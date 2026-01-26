@@ -400,24 +400,34 @@ class PDFTableExtractor:
         
         Returns:
             Combined DataFrame
+        
+        Raises:
+            ValueError: If no valid tables to combine
         """
         if not tables:
-            return pd.DataFrame()
+            raise ValueError("No tables to combine - all tables were filtered out")
         
         if len(tables) == 1:
+            logger.info(f"Single table: {len(tables[0])} rows x {len(tables[0].columns)} columns")
             return tables[0]
         
         logger.info(f"Combining {len(tables)} tables into one...")
         
+        # Filter out any empty DataFrames
+        non_empty_tables = [df for df in tables if not df.empty and len(df.columns) > 0]
+        
+        if not non_empty_tables:
+            raise ValueError("All tables are empty after cleaning")
+        
         # Get all unique columns across all tables
         all_columns = []
-        for df in tables:
+        for df in non_empty_tables:
             all_columns.extend(df.columns.tolist())
         unique_columns = list(dict.fromkeys(all_columns))  # Preserve order
         
         # Reindex all tables to have same columns
         aligned_tables = []
-        for df in tables:
+        for df in non_empty_tables:
             # Add missing columns with empty values
             for col in unique_columns:
                 if col not in df.columns:
@@ -530,13 +540,24 @@ class PDFTableExtractor:
             
             if not tables:
                 logger.error("No valid tables found in PDF")
+                logger.error("")
                 logger.error("Possible reasons:")
                 logger.error("  - PDF contains no tables")
                 logger.error("  - Tables don't have clear headers/structure")
-                logger.error("  - Try a different extraction library: --library tabula or --library camelot")
+                if self.detail_only:
+                    logger.error(f"  - All tables filtered as SUMMARY (< {self.min_detail_rows} rows)")
+                    logger.error("")
+                    logger.error("Solutions:")
+                    logger.error("  1. Include summary tables: --include-summary")
+                    logger.error(f"  2. Lower threshold: --min-detail-rows 5")
+                    logger.error("  3. Try different library: --library tabula")
+                else:
+                    logger.error("  - Try a different extraction library: --library tabula or --library camelot")
                 sys.exit(1)
             
             logger.info(f"Total valid tables extracted: {len(tables)}")
+            if self.detail_only:
+                logger.info(f"(Detail tables only, summaries filtered out)")
             
             # Save to output format
             if self.output_format == 'excel':
@@ -548,7 +569,13 @@ class PDFTableExtractor:
             
         except ValueError as e:
             logger.error(f"Error: {e}")
-            logger.error("Try using --separate-tables flag or a different extraction library")
+            logger.error("")
+            if self.detail_only:
+                logger.error("Suggestions:")
+                logger.error("  1. Try: --include-summary")
+                logger.error("  2. Try: --min-detail-rows 5")
+            else:
+                logger.error("Try using --separate-tables flag or a different extraction library")
             sys.exit(1)
         except Exception as e:
             logger.error(f"Error during processing: {e}", exc_info=True)
