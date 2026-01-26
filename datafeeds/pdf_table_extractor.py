@@ -141,8 +141,7 @@ class PDFTableExtractor:
                             df = self._clean_dataframe(df)
                             
                             # Validate it's a proper table
-                            if not self._is_valid_table(df):
-                                logger.debug(f"  Skipped invalid table on page {page_num}")
+                            if not self._is_valid_table(df, f"Page {page_num}"):
                                 continue
                             
                             # Add metadata
@@ -254,32 +253,43 @@ class PDFTableExtractor:
         
         return dataframes
     
-    def _is_valid_table(self, df: pd.DataFrame) -> bool:
+    def _is_valid_table(self, df: pd.DataFrame, debug_info: str = "") -> bool:
         """
         Check if DataFrame is a valid table (has headers and data).
         
         Args:
             df: DataFrame to validate
+            debug_info: Optional debug info for logging (e.g., "page 1")
         
         Returns:
             True if valid table, False otherwise
         """
-        # Must have at least 2 rows (header + 1 data row)
+        # Must have at least 1 data row
         if len(df) < 1:
+            logger.debug(f"  {debug_info} Skipped: No data rows")
             return False
         
-        # Must have at least 2 columns
-        if len(df.columns) < 2:
+        # Must have at least 1 column (relaxed from 2)
+        if len(df.columns) < 1:
+            logger.debug(f"  {debug_info} Skipped: No columns")
             return False
         
-        # Check if it has meaningful column names (not all empty or numeric)
-        has_headers = any(str(col).strip() for col in df.columns)
-        if not has_headers:
+        # Check if it has meaningful column names (not all empty)
+        non_empty_cols = [str(col).strip() for col in df.columns if str(col).strip()]
+        if len(non_empty_cols) == 0:
+            logger.debug(f"  {debug_info} Skipped: All column names empty")
             return False
         
         # Check if it has at least some data
         has_data = not df.empty and df.notna().any().any()
         if not has_data:
+            logger.debug(f"  {debug_info} Skipped: No data (all NaN)")
+            return False
+        
+        # Check if table is too small (likely a page number or header)
+        total_cells = len(df) * len(df.columns)
+        if total_cells < 3:  # At least 3 cells
+            logger.debug(f"  {debug_info} Skipped: Too small ({total_cells} cells)")
             return False
         
         return True
@@ -370,18 +380,35 @@ class PDFTableExtractor:
         
         Args:
             tables: List of DataFrames to save
+        
+        Raises:
+            ValueError: If no valid tables to save
         """
+        if not tables:
+            raise ValueError("No tables to save - all tables may have been filtered out")
+        
         logger.info(f"Saving {len(tables)} table(s) to Excel: {self.output_file}")
         
         with pd.ExcelWriter(self.output_file, engine='openpyxl') as writer:
             if self.combine_tables:
                 # Combine all tables into one
                 combined_df = self._combine_tables(tables)
+                
+                # Validate combined table is not empty
+                if combined_df.empty or len(combined_df.columns) == 0:
+                    raise ValueError("Combined table is empty - no valid data found")
+                
                 combined_df.to_excel(writer, sheet_name='Combined_Data', index=False)
                 logger.info(f"  Saved combined table: {len(combined_df)} rows x {len(combined_df.columns)} columns")
             else:
                 # Save each table to separate sheet
+                sheets_saved = 0
                 for idx, df in enumerate(tables, start=1):
+                    # Skip empty DataFrames
+                    if df.empty or len(df.columns) == 0:
+                        logger.warning(f"  Skipped empty table {idx}")
+                        continue
+                    
                     # Create sheet name
                     if 'page' in df.attrs:
                         sheet_name = f"Page{df.attrs['page']}_Table{df.attrs.get('table_num', idx)}"
@@ -394,6 +421,10 @@ class PDFTableExtractor:
                     # Write to Excel
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
                     logger.info(f"  Saved sheet: {sheet_name}")
+                    sheets_saved += 1
+                
+                if sheets_saved == 0:
+                    raise ValueError("No valid sheets saved - all tables were empty")
         
         logger.info(f"Successfully saved to: {self.output_file}")
     
@@ -436,10 +467,14 @@ class PDFTableExtractor:
             tables = self.extract_tables()
             
             if not tables:
-                logger.error("No tables found in PDF")
+                logger.error("No valid tables found in PDF")
+                logger.error("Possible reasons:")
+                logger.error("  - PDF contains no tables")
+                logger.error("  - Tables don't have clear headers/structure")
+                logger.error("  - Try a different extraction library: --library tabula or --library camelot")
                 sys.exit(1)
             
-            logger.info(f"Total tables extracted: {len(tables)}")
+            logger.info(f"Total valid tables extracted: {len(tables)}")
             
             # Save to output format
             if self.output_format == 'excel':
@@ -449,6 +484,10 @@ class PDFTableExtractor:
             
             logger.info("Processing complete!")
             
+        except ValueError as e:
+            logger.error(f"Error: {e}")
+            logger.error("Try using --separate-tables flag or a different extraction library")
+            sys.exit(1)
         except Exception as e:
             logger.error(f"Error during processing: {e}", exc_info=True)
             raise
