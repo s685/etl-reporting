@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from typing import List, Literal
 import pandas as pd
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
 
 # Configure logging
 logging.basicConfig(
@@ -443,6 +445,63 @@ class PDFTableExtractor:
         
         return combined
     
+    def _format_excel_sheet(self, worksheet, df: pd.DataFrame) -> None:
+        """
+        Apply professional formatting to Excel worksheet.
+        
+        Args:
+            worksheet: openpyxl worksheet object
+            df: DataFrame that was written to the sheet
+        """
+        # Define styles
+        header_font = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
+        header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+        header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        
+        data_font = Font(name='Calibri', size=10)
+        data_alignment = Alignment(horizontal='left', vertical='center')
+        
+        border_style = Border(
+            left=Side(style='thin', color='D3D3D3'),
+            right=Side(style='thin', color='D3D3D3'),
+            top=Side(style='thin', color='D3D3D3'),
+            bottom=Side(style='thin', color='D3D3D3')
+        )
+        
+        # Format header row (row 1)
+        for col_num, column in enumerate(df.columns, 1):
+            cell = worksheet.cell(row=1, column=col_num)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = border_style
+        
+        # Format data rows
+        for row_num in range(2, len(df) + 2):
+            for col_num in range(1, len(df.columns) + 1):
+                cell = worksheet.cell(row=row_num, column=col_num)
+                cell.font = data_font
+                cell.alignment = data_alignment
+                cell.border = border_style
+        
+        # Auto-fit column widths
+        for col_num, column in enumerate(df.columns, 1):
+            column_letter = get_column_letter(col_num)
+            
+            # Calculate max length for column
+            max_length = len(str(column))  # Header length
+            for value in df[column].astype(str):
+                max_length = max(max_length, len(str(value)))
+            
+            # Set column width (with limits)
+            adjusted_width = min(max_length + 2, 50)  # Max width of 50
+            worksheet.column_dimensions[column_letter].width = max(adjusted_width, 10)  # Min width of 10
+        
+        # Freeze header row
+        worksheet.freeze_panes = 'A2'
+        
+        logger.debug(f"  Applied formatting: {len(df)} rows x {len(df.columns)} columns")
+    
     def save_to_excel(self, tables: List[pd.DataFrame]) -> None:
         """
         Save tables to Excel file.
@@ -470,7 +529,13 @@ class PDFTableExtractor:
                 if combined_df.empty or len(combined_df.columns) == 0:
                     raise ValueError("Combined table is empty - no valid data found")
                 
+                # Write data
                 combined_df.to_excel(writer, sheet_name='Combined_Data', index=False)
+                
+                # Apply formatting
+                worksheet = writer.sheets['Combined_Data']
+                self._format_excel_sheet(worksheet, combined_df)
+                
                 logger.info(f"  Saved combined table: {len(combined_df)} rows x {len(combined_df.columns)} columns")
             else:
                 # Save each table to separate sheet
@@ -492,6 +557,11 @@ class PDFTableExtractor:
                     
                     # Write to Excel
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    
+                    # Apply formatting
+                    worksheet = writer.sheets[sheet_name]
+                    self._format_excel_sheet(worksheet, df)
+                    
                     logger.info(f"  Saved sheet: {sheet_name}")
                     sheets_saved += 1
                 
