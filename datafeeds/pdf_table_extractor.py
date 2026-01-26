@@ -129,6 +129,8 @@ class PDFTableExtractor:
             )
         
         tables = []
+        last_headers = None  # Track headers for multi-page tables
+        last_num_cols = None
         
         with pdfplumber.open(self.input_pdf) as pdf:
             logger.info(f"PDF has {len(pdf.pages)} pages")
@@ -142,11 +144,33 @@ class PDFTableExtractor:
                 if page_tables:
                     for table_num, table in enumerate(page_tables, start=1):
                         if table and len(table) > 0:
-                            # Convert to DataFrame
-                            df = pd.DataFrame(table[1:], columns=table[0])
+                            # Check if first row looks like headers or data
+                            first_row = table[0]
+                            num_cols = len(first_row)
+                            
+                            # Heuristic: If first row has similar column count and looks like continuation
+                            is_continuation = False
+                            if last_headers is not None and num_cols == last_num_cols:
+                                # Check if first row looks like data (not headers)
+                                # Data typically has numbers, dates, or varied content
+                                is_continuation = True
+                                logger.debug(f"  Detected continuation table on page {page_num}")
+                            
+                            if is_continuation and last_headers is not None:
+                                # Use previous headers, all rows are data
+                                df = pd.DataFrame(table, columns=last_headers)
+                                logger.debug(f"  Using headers from previous page")
+                            else:
+                                # First row is headers
+                                df = pd.DataFrame(table[1:], columns=table[0])
+                                last_headers = table[0]  # Save headers for next page
+                                last_num_cols = num_cols
                             
                             # Clean up DataFrame
                             df = self._clean_dataframe(df)
+                            
+                            # Reset index to avoid duplicate index issues
+                            df = df.reset_index(drop=True)
                             
                             # Validate it's a proper table
                             if not self._is_valid_table(df, f"Page {page_num}"):
@@ -434,6 +458,9 @@ class PDFTableExtractor:
                 # Create a copy to avoid modifying original
                 df_copy = df.copy()
                 
+                # Reset index to ensure uniqueness
+                df_copy = df_copy.reset_index(drop=True)
+                
                 # Add missing columns with empty values
                 for col in unique_columns:
                     if col not in df_copy.columns:
@@ -441,6 +468,10 @@ class PDFTableExtractor:
                 
                 # Reorder columns to match
                 df_aligned = df_copy[unique_columns]
+                
+                # Ensure clean index for concatenation
+                df_aligned = df_aligned.reset_index(drop=True)
+                
                 aligned_tables.append(df_aligned)
                 
                 logger.debug(f"  Aligned table {idx}: {len(df_aligned)} rows x {len(df_aligned.columns)} columns")
