@@ -1,0 +1,102 @@
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: LTCG/data-services-cicd-templates
+      ref: main
+
+variables:
+  vmImageName: "ubuntu-latest"
+  pythonVersion: "3.12"
+  repositoryPath: "/opt/data_integration/data-services-datamart-analytics"
+  projectName: "data-services-datamart-analytics"
+  gitBranch: "release"
+  repositoryURL: "longtermcaregroup@vs-ssh.visualstudio.com:v3/longtermcaregroup/LTCG/data-services-datamart"
+
+trigger:
+  branches:
+    include:
+      - "*"
+
+pool:
+  name: "DATA SERVICES"
+
+stages:
+  - stage: StaticAnalysisAndTest
+    jobs:
+      - job: StaticAnalysis
+        displayName: "Run Static Analysis with Pre-Commit"
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "$(pythonVersion)"
+              addToPath: true
+
+          - script: |
+              curl -sSL https://install.python-poetry.org | python3 -
+              echo "##vso[task.setvariable variable=POETRY_HOME]$HOME/.poetry"
+              echo "export PATH=$POETRY_HOME/bin:$PATH" >> $HOME/.bashrc
+              echo "source $HOME/.bashrc"
+            displayName: "Install poetry"
+
+          - script: |
+              source $HOME/.bashrc
+              poetry install --no-interaction --no-root
+            displayName: "Install Dependencies with Poetry"
+
+          - script: |
+              source $HOME/.bashrc
+              poetry run pre-commit run --all-files
+            displayName: "Run Pre-commit Hooks"
+
+      - job: Test
+        displayName: "Test"
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "$(pythonVersion)"
+              addToPath: true
+
+          - script: |
+              curl -sSL https://install.python-poetry.org | python3 -
+              echo "##vso[task.setvariable variable=POETRY_HOME]$HOME/.poetry"
+              echo "export PATH=$POETRY_HOME/bin:$PATH" >> $HOME/.bashrc
+              echo "source $HOME/.bashrc"
+            displayName: "Install poetry"
+
+          - script: |
+              source $HOME/.bashrc
+              poetry install --no-interaction --no-root
+            displayName: "Install Dependencies with Poetry"
+
+          - script: |
+              source $HOME/.bashrc
+              poetry run pytest --junitxml=test-results.xml
+            displayName: "Run Tests"
+
+  - stage: Deploy
+    displayName: "Deploy to Server"
+    dependsOn: StaticAnalysisAndTest
+    condition: |
+      and(
+        succeeded(),
+        eq(variables['Build.Reason'], 'IndividualCI'),
+        eq(variables['Build.SourceBranch'], format('refs/heads/{0}', variables['gitBranch']))
+      )
+    jobs:
+      - deployment: DeployToServer
+        environment: "edm-python-qa"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: templates/deploy-template.yaml@templates
+                  parameters:
+                    projectName: $(projectName)
+                    repositoryPath: $(repositoryPath)
+                    gitBranch: $(gitBranch)
+                    repositoryURL: $(repositoryURL)

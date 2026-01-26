@@ -1,0 +1,40 @@
+repos:
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.18.2
+    hooks:
+      - id: mypy
+        additional_dependencies:
+          - data-science-types
+          - pydantic
+          - sqlalchemy
+          - snowflake-connector-python
+          - pandas-stubs
+          - tenacity
+          - asyncio
+          - pyarrow-stubs
+          - types-psutil
+          - types-setuptools
+          - types-PyYAML
+          - types-tabulate
+          - types-aiofiles
+        exclude: tests/
+        args: ["--config-file", "mypy.ini"]
+
+  - repo: https://github.com/pycqa/isort
+    rev: 6.0.1
+    hooks:
+      - id: isort
+        name: isort (python)
+        args: ["--profile", "black", "--filter-files"]
+
+  - repo: https://github.com/PyCQA/autoflake
+    rev: v2.3.1
+    hooks:
+      - id: autoflake
+        args: [--remove-all-unused-imports, --in-place]
+
+  - repo: https://github.com/asottile/pyupgrade
+    rev: v3.20.0
+    hooks:
+      - id: pyupgrade
+        args: ["--py313-plus", "--keep-percent-format"]

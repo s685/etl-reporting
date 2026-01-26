@@ -1,0 +1,33 @@
+# PDF Table Extractor Dependencies
+# =====================================
+# Install with: pip install -r pdf_extractor_requirements.txt
+
+# Core dependencies
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# PDF extraction libraries (choose one or install all)
+# -----------------------------------------------------
+
+# Option 1: pdfplumber (RECOMMENDED - easiest to install, works for most PDFs)
+pdfplumber>=0.10.0
+
+# Option 2: tabula-py (requires Java to be installed)
+# tabula-py>=2.8.0
+
+# Option 3: camelot-py (best for bordered tables, requires Ghostscript)
+# camelot-py[cv]>=0.11.0
+# opencv-python>=4.8.0
+
+# Installation Notes:
+# -------------------
+# For pdfplumber (default):
+#   pip install pdfplumber pandas openpyxl
+#
+# For tabula-py:
+#   1. Install Java: https://www.java.com/download/
+#   2. pip install tabula-py pandas openpyxl
+#
+# For camelot-py:
+#   1. Install Ghostscript: https://ghostscript.com/releases/gsdnld.html
+#   2. pip install camelot-py[cv] pandas openpyxl
