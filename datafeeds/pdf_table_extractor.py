@@ -41,7 +41,9 @@ class PDFTableExtractor:
         output_file: str, 
         library: str = 'pdfplumber',
         output_format: str = 'excel',
-        combine_tables: bool = True
+        combine_tables: bool = True,
+        detail_only: bool = True,
+        min_detail_rows: int = 10
     ):
         """
         Initialize PDF table extractor.
@@ -52,12 +54,16 @@ class PDFTableExtractor:
             library: Extraction library to use ('pdfplumber', 'tabula', 'camelot')
             output_format: Output format ('excel' or 'csv')
             combine_tables: If True, combine all tables into one (default: True)
+            detail_only: If True, extract only detail tables (not summaries) (default: True)
+            min_detail_rows: Minimum rows to be considered detail data (default: 10)
         """
         self.input_pdf = Path(input_pdf)
         self.output_file = Path(output_file)
         self.library = library.lower()
         self.output_format = output_format.lower()
         self.combine_tables = combine_tables
+        self.detail_only = detail_only
+        self.min_detail_rows = min_detail_rows
         
         # Validate inputs
         self._validate_inputs()
@@ -144,13 +150,18 @@ class PDFTableExtractor:
                             if not self._is_valid_table(df, f"Page {page_num}"):
                                 continue
                             
+                            # Filter for detail tables only if requested
+                            if self.detail_only and not self._is_detail_table(df, f"Page {page_num}"):
+                                continue
+                            
                             # Add metadata
                             df.attrs['page'] = page_num
                             df.attrs['table_num'] = table_num
                             
                             tables.append(df)
+                            table_type = "DETAIL" if not self.detail_only else ""
                             logger.info(
-                                f"  Found table {table_num} on page {page_num}: "
+                                f"  Found {table_type} table {table_num} on page {page_num}: "
                                 f"{len(df)} rows x {len(df.columns)} columns"
                             )
         
@@ -252,6 +263,57 @@ class PDFTableExtractor:
             )
         
         return dataframes
+    
+    def _is_detail_table(self, df: pd.DataFrame, debug_info: str = "") -> bool:
+        """
+        Determine if table is detail data (vs summary data).
+        
+        Detail tables have:
+        - More rows (granular/transactional data)
+        - More columns (detailed information)
+        - Individual records (not aggregated summaries)
+        
+        Summary tables have:
+        - Fewer rows (aggregated data)
+        - Often contain "Total", "Summary", "Subtotal" in values
+        - Typically smaller
+        
+        Args:
+            df: DataFrame to check
+            debug_info: Optional debug info for logging
+        
+        Returns:
+            True if detail table, False if summary table
+        """
+        # Check 1: Row count (detail tables have more rows)
+        if len(df) < self.min_detail_rows:
+            logger.debug(f"  {debug_info} Identified as SUMMARY (only {len(df)} rows, need {self.min_detail_rows}+)")
+            return False
+        
+        # Check 2: Look for summary keywords in data
+        summary_keywords = ['total', 'summary', 'subtotal', 'grand total', 'sum', 'aggregate']
+        
+        # Convert all data to string and check for keywords
+        df_str = df.astype(str).values.flatten()
+        df_lower = [str(val).lower() for val in df_str]
+        
+        # Count how many cells contain summary keywords
+        keyword_matches = sum(1 for val in df_lower if any(keyword in val for keyword in summary_keywords))
+        
+        # If more than 20% of cells contain summary keywords, likely a summary table
+        total_cells = len(df_str)
+        if total_cells > 0 and (keyword_matches / total_cells) > 0.2:
+            logger.debug(f"  {debug_info} Identified as SUMMARY (contains summary keywords)")
+            return False
+        
+        # Check 3: Column count ratio (detail tables usually have more columns)
+        # If table has very few columns AND few rows, likely summary
+        if len(df.columns) <= 3 and len(df) < self.min_detail_rows * 2:
+            logger.debug(f"  {debug_info} Identified as SUMMARY (only {len(df.columns)} columns and {len(df)} rows)")
+            return False
+        
+        logger.debug(f"  {debug_info} Identified as DETAIL ({len(df)} rows x {len(df.columns)} columns)")
+        return True
     
     def _is_valid_table(self, df: pd.DataFrame, debug_info: str = "") -> bool:
         """
@@ -557,6 +619,26 @@ Examples:
         help='Keep tables separate (one sheet/file per table)'
     )
     
+    parser.add_argument(
+        '--detail-only',
+        action='store_true',
+        default=True,
+        help='Extract only detail tables, skip summary tables (default: True)'
+    )
+    
+    parser.add_argument(
+        '--include-summary',
+        action='store_true',
+        help='Include both detail and summary tables'
+    )
+    
+    parser.add_argument(
+        '--min-detail-rows',
+        type=int,
+        default=10,
+        help='Minimum rows to be considered detail data (default: 10)'
+    )
+    
     return parser.parse_args()
 
 
@@ -574,13 +656,18 @@ def main():
     # Determine if tables should be combined
     combine_tables = not args.separate_tables  # Default True unless --separate-tables specified
     
+    # Determine if only detail tables should be extracted
+    detail_only = not args.include_summary  # Default True unless --include-summary specified
+    
     # Create extractor and process
     extractor = PDFTableExtractor(
         input_pdf=args.input,
         output_file=args.output,
         library=args.library,
         output_format=args.format,
-        combine_tables=combine_tables
+        combine_tables=combine_tables,
+        detail_only=detail_only,
+        min_detail_rows=args.min_detail_rows
     )
     
     extractor.process()
