@@ -177,7 +177,8 @@ class PDFTableExtractor:
                                 continue
                             
                             # Filter for detail tables only if requested
-                            if self.detail_only and not self._is_detail_table(df, f"Page {page_num}"):
+                            # Pass is_continuation flag to skip row count check for continuation pages
+                            if self.detail_only and not self._is_detail_table(df, f"Page {page_num}", is_continuation=is_continuation):
                                 continue
                             
                             # Add metadata
@@ -290,7 +291,7 @@ class PDFTableExtractor:
         
         return dataframes
     
-    def _is_detail_table(self, df: pd.DataFrame, debug_info: str = "") -> bool:
+    def _is_detail_table(self, df: pd.DataFrame, debug_info: str = "", is_continuation: bool = False) -> bool:
         """
         Determine if table is detail data (vs summary data).
         
@@ -307,12 +308,14 @@ class PDFTableExtractor:
         Args:
             df: DataFrame to check
             debug_info: Optional debug info for logging
+            is_continuation: If True, skip row count check (continuation of multi-page table)
         
         Returns:
             True if detail table, False if summary table
         """
         # Check 1: Row count (detail tables have more rows)
-        if len(df) < self.min_detail_rows:
+        # Skip this check for continuation pages (last page might have fewer rows)
+        if not is_continuation and len(df) < self.min_detail_rows:
             logger.debug(f"  {debug_info} Identified as SUMMARY (only {len(df)} rows, need {self.min_detail_rows}+)")
             return False
         
