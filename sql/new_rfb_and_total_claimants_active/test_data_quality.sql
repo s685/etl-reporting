@@ -18,14 +18,7 @@ SELECT
     'DQ-001: NULL in Critical Fields' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Critical business keys must be populated' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'status', "Status",
-            'decision_date', "EDB Decision Date"
-        )
-    ) WITHIN GROUP (ORDER BY "Policy Number" LIMIT 5) AS SAMPLE_FAILURES
+    'Critical business keys must be populated' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE "Policy Number" IS NULL
     OR "Status" IS NULL
@@ -38,14 +31,7 @@ SELECT
     'DQ-002: NULL in Calculated Fields' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'DAYS and NumDaysResolvedWithinTwoWeeks must be calculated' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'days', DAYS,
-            'two_week_flag', NumDaysResolvedWithinTwoWeeks
-        )
-    ) WITHIN GROUP (ORDER BY "Policy Number" LIMIT 5) AS SAMPLE_FAILURES
+    'DAYS and NumDaysResolvedWithinTwoWeeks must be calculated' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE DAYS IS NULL
     OR NumDaysResolvedWithinTwoWeeks IS NULL;
@@ -55,13 +41,12 @@ SELECT
     'DQ-003: Empty Strings in Fields' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Empty strings should be NULL for consistency' AS BUSINESS_IMPACT,
-    ARRAY_AGG("Policy Number") WITHIN GROUP (ORDER BY "Policy Number" LIMIT 5) AS SAMPLE_FAILURES
+    'Empty strings should be NULL for consistency' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
-WHERE TRIM("Policy Number") = ''
-    OR TRIM("Status") = ''
-    OR TRIM("Insurance Group") = ''
-    OR TRIM(carrier_name) = '';
+WHERE "Policy Number" = ''
+    OR "Status" = ''
+    OR "Insurance Group" = ''
+    OR carrier_name = '';
 
 -- =====================================================================
 -- CATEGORY 2: DUPLICATE DETECTION
@@ -72,15 +57,7 @@ SELECT
     'DQ-004: Duplicate Policy Records' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Same policy should not appear twice with same dates - indicates data multiplication' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'count', cnt,
-            'status', "Status",
-            'decision_date', "EDB Decision Date"
-        )
-    ) WITHIN GROUP (ORDER BY cnt DESC LIMIT 10) AS SAMPLE_FAILURES
+    'Same policy should not appear twice with same dates - indicates data multiplication' AS BUSINESS_IMPACT
 FROM (
     SELECT 
         "Policy Number",
@@ -98,13 +75,7 @@ SELECT
     'DQ-005: Excessive Policy Duplicates' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Policy appears >10 times - severe data multiplication issue' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'count', cnt
-        )
-    ) WITHIN GROUP (ORDER BY cnt DESC LIMIT 10) AS SAMPLE_FAILURES
+    'Policy appears >10 times - severe data multiplication issue' AS BUSINESS_IMPACT
 FROM (
     SELECT 
         "Policy Number",
@@ -123,14 +94,7 @@ SELECT
     'DQ-006: Invalid Date Formats' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Dates must be in MM/DD/YYYY format for downstream systems' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'start_date', "Statistical Start Date",
-            'decision_date', "EDB Decision Date"
-        )
-    ) WITHIN GROUP (ORDER BY "Policy Number" LIMIT 5) AS SAMPLE_FAILURES
+    'Dates must be in MM/DD/YYYY format for downstream systems' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE TRY_TO_DATE("Statistical Start Date", 'MM/DD/YYYY') IS NULL
     OR TRY_TO_DATE("EDB Decision Date", 'MM/DD/YYYY') IS NULL;
@@ -140,14 +104,7 @@ SELECT
     'DQ-007: Invalid Numeric Values' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'DAYS and NumDaysResolvedWithinTwoWeeks must be valid integers' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'days', DAYS,
-            'flag', NumDaysResolvedWithinTwoWeeks
-        )
-    ) WITHIN GROUP (ORDER BY "Policy Number" LIMIT 5) AS SAMPLE_FAILURES
+    'DAYS and NumDaysResolvedWithinTwoWeeks must be valid integers' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE TRY_CAST(DAYS AS INTEGER) IS NULL
     OR TRY_CAST(NumDaysResolvedWithinTwoWeeks AS INTEGER) IS NULL;
@@ -161,15 +118,7 @@ SELECT
     'DQ-008: Negative Turnaround Days' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Turnaround time cannot be negative - calculation error' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'days', DAYS,
-            'start_date', "Statistical Start Date",
-            'decision_date', "EDB Decision Date"
-        )
-    ) WITHIN GROUP (ORDER BY DAYS LIMIT 5) AS SAMPLE_FAILURES
+    'Turnaround time cannot be negative - calculation error' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE DAYS < 0;
 
@@ -178,14 +127,7 @@ SELECT
     'DQ-009: Unrealistic Turnaround Times' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'WARNING' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Processing took >730 days - may be valid but investigate' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'days', DAYS,
-            'status', "Status"
-        )
-    ) WITHIN GROUP (ORDER BY DAYS DESC LIMIT 10) AS SAMPLE_FAILURES
+    'Processing took >730 days - may be valid but investigate' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE DAYS > 730;
 
@@ -194,14 +136,7 @@ SELECT
     'DQ-010: Future Decision Dates' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Decision dates in future indicate system clock issues' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'decision_date', "EDB Decision Date",
-            'days_in_future', DATEDIFF(DAY, CURRENT_DATE(), TRY_TO_DATE("EDB Decision Date", 'MM/DD/YYYY'))
-        )
-    ) WITHIN GROUP (ORDER BY "EDB Decision Date" DESC LIMIT 5) AS SAMPLE_FAILURES
+    'Decision dates in future indicate system clock issues' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE TRY_TO_DATE("EDB Decision Date", 'MM/DD/YYYY') > CURRENT_DATE();
 
@@ -210,15 +145,7 @@ SELECT
     'DQ-011: Decision Before Start Date' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Decision cannot happen before RFB start - data corruption' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'start_date', "Statistical Start Date",
-            'decision_date', "EDB Decision Date",
-            'days', DAYS
-        )
-    ) WITHIN GROUP (ORDER BY "Policy Number" LIMIT 5) AS SAMPLE_FAILURES
+    'Decision cannot happen before RFB start - data corruption' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE TRY_TO_DATE("Statistical Start Date", 'MM/DD/YYYY') > 
       TRY_TO_DATE("EDB Decision Date", 'MM/DD/YYYY');
@@ -228,15 +155,7 @@ SELECT
     'DQ-012: TwoWeek Flag Inconsistency' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'NumDaysResolvedWithinTwoWeeks flag does not match DAYS value' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'days', DAYS,
-            'flag', NumDaysResolvedWithinTwoWeeks,
-            'expected_flag', CASE WHEN DAYS < 14 THEN 1 ELSE 0 END
-        )
-    ) WITHIN GROUP (ORDER BY DAYS LIMIT 10) AS SAMPLE_FAILURES
+    'NumDaysResolvedWithinTwoWeeks flag does not match DAYS value' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE (NumDaysResolvedWithinTwoWeeks = 1 AND DAYS >= 14)
     OR (NumDaysResolvedWithinTwoWeeks = 0 AND DAYS < 14);
@@ -250,8 +169,7 @@ SELECT
     'DQ-013: Orphaned Policies' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Policy numbers in report do not exist in source policy table' AS BUSINESS_IMPACT,
-    ARRAY_AGG("Policy Number") WITHIN GROUP (ORDER BY "Policy Number" LIMIT 10) AS SAMPLE_FAILURES
+    'Policy numbers in report do not exist in source policy table' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table) r
 WHERE NOT EXISTS (
     SELECT 1 
@@ -264,14 +182,7 @@ SELECT
     'DQ-014: Invalid Status Codes' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Status values do not match eb_status lookup table' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'status', "Status",
-            'status_cd', status_cd
-        )
-    ) WITHIN GROUP (ORDER BY "Status" LIMIT 10) AS SAMPLE_FAILURES
+    'Status values do not match eb_status lookup table' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table) r
 WHERE NOT EXISTS (
     SELECT 1 
@@ -311,13 +222,7 @@ SELECT
     'DQ-016: Multiple Carrier Names' AS TEST_ID,
     CASE WHEN COUNT(*) = 1 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) - 1 AS FAILED_ROWS,
-    'Report should have single carrier_name from session variable' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'carrier_name', carrier_name,
-            'count', cnt
-        )
-    ) WITHIN GROUP (ORDER BY cnt DESC) AS SAMPLE_FAILURES
+    'Report should have single carrier_name from session variable' AS BUSINESS_IMPACT
 FROM (
     SELECT 
         carrier_name,
@@ -331,13 +236,12 @@ SELECT
     'DQ-017: Missing State Data' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'WARNING' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Geographic data (states) missing - impacts regional analysis' AS BUSINESS_IMPACT,
-    ARRAY_AGG("Policy Number") WITHIN GROUP (ORDER BY "Policy Number" LIMIT 10) AS SAMPLE_FAILURES
+    'Geographic data (states) missing - impacts regional analysis' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE "Residence State" IS NULL
     OR "Issue State" IS NULL
-    OR TRIM("Residence State") = ''
-    OR TRIM("Issue State") = '';
+    OR "Residence State" = ''
+    OR "Issue State" = '';
 
 -- =====================================================================
 -- CATEGORY 7: CONSISTENCY CHECKS
@@ -348,13 +252,7 @@ SELECT
     'DQ-018: Modified By Format' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'WARNING' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Modified By contains domain prefix (DOMAIN\user) - should be stripped' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'modified_by', "Modified By"
-        )
-    ) WITHIN GROUP (ORDER BY "Policy Number" LIMIT 10) AS SAMPLE_FAILURES
+    'Modified By contains domain prefix (DOMAIN\user) - should be stripped' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE "Modified By" LIKE '%\\%';
 
@@ -363,24 +261,17 @@ SELECT
     'DQ-019: Missing Insurance Group' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Insurance Group is required for grouping and analysis' AS BUSINESS_IMPACT,
-    ARRAY_AGG("Policy Number") WITHIN GROUP (ORDER BY "Policy Number" LIMIT 10) AS SAMPLE_FAILURES
+    'Insurance Group is required for grouping and analysis' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE "Insurance Group" IS NULL
-    OR TRIM("Insurance Group") = '';
+    OR "Insurance Group" = '';
 
 -- Test 7.3: Date consistency across report
 SELECT 
     'DQ-020: Dates Within Report Period' AS TEST_ID,
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS STATUS,
     COUNT(*) AS FAILED_ROWS,
-    'Decision dates should be within report period [$REPORT_START_DT to $REPORT_END_DT]' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'policy_no', "Policy Number",
-            'decision_date', "EDB Decision Date"
-        )
-    ) WITHIN GROUP (ORDER BY "EDB Decision Date" LIMIT 10) AS SAMPLE_FAILURES
+    'Decision dates should be within report period [$REPORT_START_DT to $REPORT_END_DT]' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table)
 WHERE TRY_TO_DATE("EDB Decision Date", 'MM/DD/YYYY') NOT BETWEEN $REPORT_START_DT AND $REPORT_END_DT;
 
@@ -442,23 +333,9 @@ FROM (
 SELECT 
     'DQ-023: Status Distribution' AS TEST_ID,
     'INFO' AS STATUS,
-    NULL AS FAILED_ROWS,
-    'Distribution of claim statuses - verify expected patterns' AS BUSINESS_IMPACT,
-    ARRAY_AGG(
-        OBJECT_CONSTRUCT(
-            'status', "Status",
-            'count', cnt,
-            'percentage', ROUND(percentage, 2)
-        )
-    ) WITHIN GROUP (ORDER BY cnt DESC) AS SAMPLE_FAILURES
-FROM (
-    SELECT 
-        "Status",
-        COUNT(*) AS cnt,
-        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER () AS percentage
-    FROM IDENTIFIER($report_table)
-    GROUP BY "Status"
-);
+    COUNT(DISTINCT "Status") AS DISTINCT_STATUSES,
+    'Distribution of claim statuses - verify expected patterns' AS BUSINESS_IMPACT
+FROM IDENTIFIER($report_table);
 
 -- =====================================================================
 -- FINAL SUMMARY
