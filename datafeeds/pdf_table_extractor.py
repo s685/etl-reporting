@@ -264,8 +264,12 @@ class PDFTableExtractor:
         
         # Strip whitespace from string columns
         for col in df.columns:
-            if pd.api.types.is_string_dtype(df[col]) or df[col].dtype == 'object':
+            try:
+                # Try to strip whitespace if column contains string-like data
                 df[col] = df[col].astype(str).str.strip()
+            except (AttributeError, TypeError):
+                # If column can't be converted to string, skip it
+                pass
         
         # Replace None/NaN with empty string for string columns
         df = df.fillna('')
