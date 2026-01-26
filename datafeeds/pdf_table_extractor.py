@@ -429,17 +429,46 @@ class PDFTableExtractor:
         
         # Reindex all tables to have same columns
         aligned_tables = []
-        for df in non_empty_tables:
-            # Add missing columns with empty values
-            for col in unique_columns:
-                if col not in df.columns:
-                    df[col] = ''
-            # Reorder columns to match
-            df = df[unique_columns]
-            aligned_tables.append(df)
+        for idx, df in enumerate(non_empty_tables, 1):
+            try:
+                # Create a copy to avoid modifying original
+                df_copy = df.copy()
+                
+                # Add missing columns with empty values
+                for col in unique_columns:
+                    if col not in df_copy.columns:
+                        df_copy[col] = ''
+                
+                # Reorder columns to match
+                df_aligned = df_copy[unique_columns]
+                aligned_tables.append(df_aligned)
+                
+                logger.debug(f"  Aligned table {idx}: {len(df_aligned)} rows x {len(df_aligned.columns)} columns")
+                
+            except Exception as e:
+                logger.error(f"  Error aligning table {idx}: {e}")
+                # Try to continue with other tables
+                continue
+        
+        if not aligned_tables:
+            raise ValueError("Failed to align any tables for concatenation")
         
         # Concatenate all tables
-        combined = pd.concat(aligned_tables, ignore_index=True)
+        try:
+            combined = pd.concat(aligned_tables, ignore_index=True, sort=False)
+        except Exception as e:
+            logger.error(f"Error during concatenation: {e}")
+            logger.error("Attempting alternative concatenation method...")
+            
+            # Alternative: Convert all to string first
+            try:
+                string_tables = []
+                for df in aligned_tables:
+                    df_str = df.astype(str)
+                    string_tables.append(df_str)
+                combined = pd.concat(string_tables, ignore_index=True, sort=False)
+            except Exception as e2:
+                raise ValueError(f"Cannot concatenate tables: {e}. Alternative method also failed: {e2}")
         
         logger.info(f"Combined table: {len(combined)} rows x {len(combined.columns)} columns")
         
