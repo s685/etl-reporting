@@ -40,7 +40,8 @@ class PDFTableExtractor:
         input_pdf: str, 
         output_file: str, 
         library: str = 'pdfplumber',
-        output_format: str = 'excel'
+        output_format: str = 'excel',
+        combine_tables: bool = True
     ):
         """
         Initialize PDF table extractor.
@@ -50,11 +51,13 @@ class PDFTableExtractor:
             output_file: Path to output file (Excel or CSV)
             library: Extraction library to use ('pdfplumber', 'tabula', 'camelot')
             output_format: Output format ('excel' or 'csv')
+            combine_tables: If True, combine all tables into one (default: True)
         """
         self.input_pdf = Path(input_pdf)
         self.output_file = Path(output_file)
         self.library = library.lower()
         self.output_format = output_format.lower()
+        self.combine_tables = combine_tables
         
         # Validate inputs
         self._validate_inputs()
@@ -136,6 +139,11 @@ class PDFTableExtractor:
                             
                             # Clean up DataFrame
                             df = self._clean_dataframe(df)
+                            
+                            # Validate it's a proper table
+                            if not self._is_valid_table(df):
+                                logger.debug(f"  Skipped invalid table on page {page_num}")
+                                continue
                             
                             # Add metadata
                             df.attrs['page'] = page_num
@@ -246,6 +254,36 @@ class PDFTableExtractor:
         
         return dataframes
     
+    def _is_valid_table(self, df: pd.DataFrame) -> bool:
+        """
+        Check if DataFrame is a valid table (has headers and data).
+        
+        Args:
+            df: DataFrame to validate
+        
+        Returns:
+            True if valid table, False otherwise
+        """
+        # Must have at least 2 rows (header + 1 data row)
+        if len(df) < 1:
+            return False
+        
+        # Must have at least 2 columns
+        if len(df.columns) < 2:
+            return False
+        
+        # Check if it has meaningful column names (not all empty or numeric)
+        has_headers = any(str(col).strip() for col in df.columns)
+        if not has_headers:
+            return False
+        
+        # Check if it has at least some data
+        has_data = not df.empty and df.notna().any().any()
+        if not has_data:
+            return False
+        
+        return True
+    
     def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Clean extracted DataFrame.
@@ -279,9 +317,56 @@ class PDFTableExtractor:
         
         return df
     
+    def _combine_tables(self, tables: List[pd.DataFrame]) -> pd.DataFrame:
+        """
+        Combine multiple tables into one DataFrame.
+        
+        Handles tables with different columns by using union of all columns.
+        
+        Args:
+            tables: List of DataFrames to combine
+        
+        Returns:
+            Combined DataFrame
+        """
+        if not tables:
+            return pd.DataFrame()
+        
+        if len(tables) == 1:
+            return tables[0]
+        
+        logger.info(f"Combining {len(tables)} tables into one...")
+        
+        # Get all unique columns across all tables
+        all_columns = []
+        for df in tables:
+            all_columns.extend(df.columns.tolist())
+        unique_columns = list(dict.fromkeys(all_columns))  # Preserve order
+        
+        # Reindex all tables to have same columns
+        aligned_tables = []
+        for df in tables:
+            # Add missing columns with empty values
+            for col in unique_columns:
+                if col not in df.columns:
+                    df[col] = ''
+            # Reorder columns to match
+            df = df[unique_columns]
+            aligned_tables.append(df)
+        
+        # Concatenate all tables
+        combined = pd.concat(aligned_tables, ignore_index=True)
+        
+        logger.info(f"Combined table: {len(combined)} rows x {len(combined.columns)} columns")
+        
+        return combined
+    
     def save_to_excel(self, tables: List[pd.DataFrame]) -> None:
         """
-        Save tables to Excel file with multiple sheets.
+        Save tables to Excel file.
+        
+        If combine_tables=True, all tables go into one sheet.
+        If combine_tables=False, each table gets its own sheet.
         
         Args:
             tables: List of DataFrames to save
@@ -289,19 +374,26 @@ class PDFTableExtractor:
         logger.info(f"Saving {len(tables)} table(s) to Excel: {self.output_file}")
         
         with pd.ExcelWriter(self.output_file, engine='openpyxl') as writer:
-            for idx, df in enumerate(tables, start=1):
-                # Create sheet name
-                if 'page' in df.attrs:
-                    sheet_name = f"Page{df.attrs['page']}_Table{df.attrs.get('table_num', idx)}"
-                else:
-                    sheet_name = f"Table_{idx}"
-                
-                # Excel sheet names must be <= 31 characters
-                sheet_name = sheet_name[:31]
-                
-                # Write to Excel
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-                logger.info(f"  Saved sheet: {sheet_name}")
+            if self.combine_tables:
+                # Combine all tables into one
+                combined_df = self._combine_tables(tables)
+                combined_df.to_excel(writer, sheet_name='Combined_Data', index=False)
+                logger.info(f"  Saved combined table: {len(combined_df)} rows x {len(combined_df.columns)} columns")
+            else:
+                # Save each table to separate sheet
+                for idx, df in enumerate(tables, start=1):
+                    # Create sheet name
+                    if 'page' in df.attrs:
+                        sheet_name = f"Page{df.attrs['page']}_Table{df.attrs.get('table_num', idx)}"
+                    else:
+                        sheet_name = f"Table_{idx}"
+                    
+                    # Excel sheet names must be <= 31 characters
+                    sheet_name = sheet_name[:31]
+                    
+                    # Write to Excel
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    logger.info(f"  Saved sheet: {sheet_name}")
         
         logger.info(f"Successfully saved to: {self.output_file}")
     
@@ -309,12 +401,19 @@ class PDFTableExtractor:
         """
         Save tables to CSV file(s).
         
-        If multiple tables, creates separate files with suffix.
+        If combine_tables=True, all tables saved to one CSV.
+        If combine_tables=False and multiple tables, creates separate files.
         
         Args:
             tables: List of DataFrames to save
         """
-        if len(tables) == 1:
+        if self.combine_tables:
+            # Combine all tables into one CSV
+            combined_df = self._combine_tables(tables)
+            combined_df.to_csv(self.output_file, index=False)
+            logger.info(f"Saved combined table to: {self.output_file}")
+            logger.info(f"  {len(combined_df)} rows x {len(combined_df.columns)} columns")
+        elif len(tables) == 1:
             # Single table - save to specified filename
             tables[0].to_csv(self.output_file, index=False)
             logger.info(f"Saved to: {self.output_file}")
@@ -406,6 +505,19 @@ Examples:
         help='Output format (default: excel)'
     )
     
+    parser.add_argument(
+        '--combine-tables',
+        action='store_true',
+        default=True,
+        help='Combine all tables into one (default: True)'
+    )
+    
+    parser.add_argument(
+        '--separate-tables',
+        action='store_true',
+        help='Keep tables separate (one sheet/file per table)'
+    )
+    
     return parser.parse_args()
 
 
@@ -420,12 +532,16 @@ def main():
     elif output_ext == '.csv':
         args.format = 'csv'
     
+    # Determine if tables should be combined
+    combine_tables = not args.separate_tables  # Default True unless --separate-tables specified
+    
     # Create extractor and process
     extractor = PDFTableExtractor(
         input_pdf=args.input,
         output_file=args.output,
         library=args.library,
-        output_format=args.format
+        output_format=args.format,
+        combine_tables=combine_tables
     )
     
     extractor.process()
