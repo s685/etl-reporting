@@ -16,8 +16,8 @@
 --   1. Enterprise Edition (required for DMFs)
 --   2. EXECUTE DATA METRIC FUNCTION ON ACCOUNT privilege
 --   3. Object owner must be custom/system role (not database role)
---   4. report_period_all_frequencies view exists (created via report_period_config.sql)
---      Single view with 6 rows: DAILY, WEEKLY, MONTHLY, QUARTERLY, SEMI_ANNUAL, YEARLY
+--   4. report_period_all_frequencies view exists (report_period_config.sql)
+--   5. source_rfb_count_monthly view created in STEP 1b (uses EOB, care_mgmt, config; MONTHLY)
 -- 
 -- Docs: https://docs.snowflake.com/en/user-guide/data-quality-intro
 --       https://docs.snowflake.com/en/sql-reference/sql/create-data-metric-function
@@ -30,10 +30,11 @@
 SET target_table = '{{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.new_rfb_and_total_claimants_active_detail';
 SET source_database = '{{SOURCE_DATABASE}}';
 SET config_view = '{{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.report_period_all_frequencies';
+SET source_view = '{{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.source_rfb_count_monthly';
 
 -- Object type: VIEW (change to TABLE if target is a table)
--- Report period: Single view with 6 rows (one per frequency). Includes as_of_run_dt = CURRENT_DATE().
---   This DMF filters WHERE frequency = 'MONTHLY'. Use wrapper views or separate ADDs for other frequencies.
+-- Snowflake DMFs accept only 1 or 2 TABLE arguments. We use: (1) target, (2) source view.
+-- source_rfb_count_monthly embeds EOB + care_mgmt + report_period_all_frequencies (MONTHLY).
 
 -- =====================================================================
 -- STEP 1: SET SCHEDULE (REQUIRED BEFORE ADDING DMFs)
@@ -46,148 +47,88 @@ ALTER VIEW IDENTIFIER($target_table)
 SET DATA_METRIC_SCHEDULE = 'USING CRON 0 8,14,20 * * * UTC';
 
 -- =====================================================================
--- STEP 2: CREATE CUSTOM DMF (PRODUCTION-OPTIMIZED)
+-- STEP 1b: CREATE SOURCE VIEW FOR DMF (REQUIRED: DMF accepts only 1 or 2 TABLE args)
 -- =====================================================================
--- Design optimizations:
---   1. Scalar subquery for report period (avoids CROSS JOIN multiplication)
---   2. QUALIFY for ROW_NUMBER filtering (more efficient than separate CTE)
---   3. Early date filtering before window functions (reduces data processed)
---   4. Column pruning (only select needed columns)
---   5. Efficient window functions (MIN OVER + ROW_NUMBER in single pass)
---   6. UNION (not UNION ALL) to handle potential duplicates correctly
---   7. NULL-safe operations and edge case handling
+-- Encapsulates EOB + care_mgmt + report period (MONTHLY from report_period_all_frequencies).
+-- Run report_period_config.sql first so report_period_all_frequencies exists.
+
+CREATE OR REPLACE VIEW IDENTIFIER($source_view) AS
+WITH
+report_period AS (
+    SELECT report_start_date AS report_start, report_end_date AS report_end
+    FROM {{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.report_period_all_frequencies
+    WHERE frequency = 'MONTHLY'
+    LIMIT 1
+),
+eob_latest AS (
+    SELECT rfb_id, eb_decision_dt
+    FROM {{SOURCE_DATABASE}}.dbo.episode_of_benefit eob, report_period rp
+    WHERE eob.last_mod_dt <= rp.report_end
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY episode_of_benefit_id
+        ORDER BY last_mod_dt DESC, sequence_no DESC
+    ) = 1
+),
+eob_ranking AS (
+    SELECT
+        rfb_id,
+        MIN(eb_decision_dt) OVER (PARTITION BY rfb_id) AS firstebdecisiondt,
+        ROW_NUMBER() OVER (PARTITION BY rfb_id ORDER BY eb_decision_dt) AS rank_val
+    FROM eob_latest
+),
+eob_source AS (
+    SELECT rfb_id
+    FROM eob_ranking, report_period rp
+    WHERE firstebdecisiondt BETWEEN rp.report_start AND rp.report_end
+      AND rank_val = 1
+),
+care_mgmt_latest AS (
+    SELECT rfb_id, contracted_service_id, cms_end_dt
+    FROM {{SOURCE_DATABASE}}.dbo.care_mgmt_service cm, report_period rp
+    WHERE cm.sequenced_at <= rp.report_end
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY rfb_id, contracted_service_id
+        ORDER BY sequenced_at DESC, sequence_no DESC
+    ) = 1
+),
+care_mgmt_source AS (
+    SELECT rfb_id
+    FROM care_mgmt_latest, report_period rp
+    WHERE contracted_service_id IN (28, 31, 48, 47, 77)
+      AND cms_end_dt BETWEEN rp.report_start AND rp.report_end
+)
+SELECT rfb_id FROM eob_source
+UNION
+SELECT rfb_id FROM care_mgmt_source;
+
+-- =====================================================================
+-- STEP 2: CREATE CUSTOM DMF (2 TABLE ARGS ONLY: target + source view)
+-- =====================================================================
+-- DMF has exactly 2 TABLE arguments (Snowflake limit). Source logic lives in source_rfb_count_monthly view.
 
 CREATE OR REPLACE DATA METRIC FUNCTION source_target_count_difference(
     arg_target TABLE(arg_policy_number VARCHAR),
-    arg_eob TABLE(
-        arg_eob_id VARCHAR,
-        arg_eob_rfb_id VARCHAR,
-        arg_eob_decision_dt DATE,
-        arg_eob_last_mod_dt DATE,
-        arg_eob_sequence_no NUMBER
-    ),
-    arg_care_mgmt TABLE(
-        arg_cm_rfb_id VARCHAR,
-        arg_cm_service_id NUMBER,
-        arg_cm_end_dt DATE,
-        arg_cm_sequenced_at DATE,
-        arg_cm_sequence_no NUMBER
-    ),
-    arg_config TABLE(
-        arg_frequency VARCHAR,
-        arg_report_start_date DATE,
-        arg_report_end_date DATE,
-        arg_as_of_run_dt DATE,
-        arg_carrier_name VARCHAR
-    )
+    arg_source TABLE(arg_rfb_id VARCHAR)
 )
 RETURNS NUMBER
 AS $$
-    -- Report period: from report_period_all_frequencies (6 rows). Filter frequency = 'MONTHLY'.
-    -- as_of_run_dt = CURRENT_DATE() in config; view executes at query time.
-    -- Scalar subquery pattern for efficiency (single value, no CROSS JOIN)
     SELECT ABS(
-        -- Target count: simple aggregation
         (SELECT COUNT(*) FROM arg_target) -
-        
-        -- Source count: UNION of eob_ranking and care_mgmt_ranking
-        (SELECT COUNT(*) FROM (
-            -- EOB source: latest records per episode_of_benefit_id, then first decision per RFB
-            WITH
-            report_period AS (
-                SELECT 
-                    arg_report_start_date AS report_start,
-                    arg_report_end_date AS report_end
-                FROM arg_config
-                WHERE arg_frequency = 'MONTHLY'
-                LIMIT 1
-            ),
-            -- Step 1: Latest EOB records (QUALIFY for efficiency)
-            eob_latest AS (
-                SELECT 
-                    arg_eob_rfb_id,
-                    arg_eob_decision_dt
-                FROM arg_eob, report_period
-                WHERE arg_eob_last_mod_dt <= report_period.report_end
-                QUALIFY ROW_NUMBER() OVER (
-                    PARTITION BY arg_eob_id 
-                    ORDER BY arg_eob_last_mod_dt DESC, arg_eob_sequence_no DESC
-                ) = 1
-            ),
-            -- Step 2: First decision date per RFB with rank
-            eob_ranking AS (
-                SELECT
-                    arg_eob_rfb_id AS rfb_id,
-                    MIN(arg_eob_decision_dt) OVER (PARTITION BY arg_eob_rfb_id) AS firstebdecisiondt,
-                    ROW_NUMBER() OVER (PARTITION BY arg_eob_rfb_id ORDER BY arg_eob_decision_dt) AS rank_val
-                FROM eob_latest
-            ),
-            -- Step 3: EOB records within report period (rank = 1)
-            eob_source AS (
-                SELECT rfb_id
-                FROM eob_ranking, report_period
-                WHERE firstebdecisiondt BETWEEN report_period.report_start AND report_period.report_end
-                  AND rank_val = 1
-            ),
-            -- Step 4: Latest Care Management records (QUALIFY for efficiency)
-            care_mgmt_latest AS (
-                SELECT 
-                    arg_cm_rfb_id,
-                    arg_cm_service_id,
-                    arg_cm_end_dt
-                FROM arg_care_mgmt, report_period
-                WHERE arg_cm_sequenced_at <= report_period.report_end
-                QUALIFY ROW_NUMBER() OVER (
-                    PARTITION BY arg_cm_rfb_id, arg_cm_service_id 
-                    ORDER BY arg_cm_sequenced_at DESC, arg_cm_sequence_no DESC
-                ) = 1
-            ),
-            -- Step 5: Care Management records for specific service types within period
-            care_mgmt_source AS (
-                SELECT arg_cm_rfb_id AS rfb_id
-                FROM care_mgmt_latest, report_period
-                WHERE arg_cm_service_id IN (28, 31, 48, 47, 77)
-                  AND arg_cm_end_dt BETWEEN report_period.report_start AND report_period.report_end
-            )
-            -- Step 6: UNION of both sources (handles duplicates correctly)
-            SELECT rfb_id FROM eob_source
-            UNION
-            SELECT rfb_id FROM care_mgmt_source
-        ))
+        (SELECT COUNT(*) FROM arg_source)
     )
 $$;
 
 -- =====================================================================
 -- STEP 3: ADD DMF TO TARGET TABLE/VIEW
 -- =====================================================================
--- Multiple TABLE arguments: first is target table, additional are fully qualified
+-- Exactly 2 TABLE arguments: (1) target, (2) source_rfb_count_monthly view
 -- Column names in ON clause must match actual table/view column names
--- Column order in TABLE() must match the order used in ADD statement
+-- If you previously added this DMF with 4 table args, DROP it first (see MAINTENANCE below), then run ADD.
 
 ALTER VIEW IDENTIFIER($target_table)
 ADD DATA METRIC FUNCTION source_target_count_difference ON (
     "Policy Number",
-    TABLE IDENTIFIER($source_database || '.dbo.episode_of_benefit')(
-        episode_of_benefit_id,
-        rfb_id,
-        eb_decision_dt,
-        last_mod_dt,
-        sequence_no
-    ),
-    TABLE IDENTIFIER($source_database || '.dbo.care_mgmt_service')(
-        rfb_id,
-        contracted_service_id,
-        cms_end_dt,
-        sequenced_at,
-        sequence_no
-    ),
-    TABLE IDENTIFIER($config_view)(
-        frequency,
-        report_start_date,
-        report_end_date,
-        as_of_run_dt,
-        carrier_name
-    )
+    TABLE IDENTIFIER($source_view)(rfb_id)
 );
 
 -- =====================================================================
@@ -201,26 +142,7 @@ CREATE OR REPLACE EXPECTATION source_target_count_match
 ON TABLE IDENTIFIER($target_table)
 FOR DATA METRIC FUNCTION source_target_count_difference(
     "Policy Number",
-    TABLE IDENTIFIER($source_database || '.dbo.episode_of_benefit')(
-        episode_of_benefit_id,
-        rfb_id,
-        eb_decision_dt,
-        last_mod_dt,
-        sequence_no
-    ),
-    TABLE IDENTIFIER($source_database || '.dbo.care_mgmt_service')(
-        rfb_id,
-        contracted_service_id,
-        cms_end_dt,
-        sequenced_at,
-        sequence_no
-    ),
-    TABLE IDENTIFIER($config_view)(
-        frequency,
-        report_start_date,
-        report_end_date,
-        carrier_name
-    )
+    TABLE IDENTIFIER($source_view)(rfb_id)
 )
 EXPECT VALUE = 0
 WITH COMMENT 'DQ-024: Source count must match target count (eob_ranking + care_mgmt_ranking). Returns absolute difference: 0 = match, >0 = mismatch.';
@@ -276,9 +198,7 @@ LIMIT 10;
 /*
 SELECT source_target_count_difference(
     TABLE({{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.new_rfb_and_total_claimants_active_detail("Policy Number")),
-    TABLE({{SOURCE_DATABASE}}.dbo.episode_of_benefit(episode_of_benefit_id, rfb_id, eb_decision_dt, last_mod_dt, sequence_no)),
-    TABLE({{SOURCE_DATABASE}}.dbo.care_mgmt_service(rfb_id, contracted_service_id, cms_end_dt, sequenced_at, sequence_no)),
-    TABLE({{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.report_period_all_frequencies(frequency, report_start_date, report_end_date, as_of_run_dt, carrier_name))
+    TABLE({{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.source_rfb_count_monthly(rfb_id))
 ) AS count_difference;
 */
 
@@ -299,9 +219,7 @@ SELECT source_target_count_difference(
 -- ALTER VIEW IDENTIFIER($target_table)
 -- DROP DATA METRIC FUNCTION source_target_count_difference ON (
 --     "Policy Number",
---     TABLE IDENTIFIER($source_database || '.dbo.episode_of_benefit')(...),
---     TABLE IDENTIFIER($source_database || '.dbo.care_mgmt_service')(...),
---     TABLE IDENTIFIER($config_view)(...)
+--     TABLE IDENTIFIER($source_view)(rfb_id)
 -- );
 
 -- Drop expectation
@@ -310,36 +228,18 @@ SELECT source_target_count_difference(
 -- =====================================================================
 -- DESIGN NOTES & BEST PRACTICES
 -- =====================================================================
--- 1. DETERMINISTIC EXPRESSIONS:
---    - DMF body reads from table arguments only (no session variables)
---    - Config view report_period_all_frequencies uses CURRENT_DATE() for as_of_run_dt and date logic; deterministic at query time
---    - All expressions produce same result for same input data
+-- 1. TABLE ARGUMENT LIMIT:
+--    - Snowflake DMFs accept only 1 or 2 TABLE arguments. We use target + source_rfb_count_monthly.
+--    - Source logic (EOB + care_mgmt + report period) lives in source_rfb_count_monthly view.
 --
--- 2. PERFORMANCE OPTIMIZATIONS:
---    - QUALIFY filters during window function evaluation (reduces intermediate data)
---    - Early date filtering before window functions (reduces data processed)
---    - Scalar subquery for report period (avoids CROSS JOIN multiplication)
---    - Column pruning (only select needed columns in CTEs)
---    - Efficient window functions (MIN OVER + ROW_NUMBER in single CTE)
+-- 2. DETERMINISTIC EXPRESSIONS:
+--    - DMF body reads only from the two table arguments. No session variables.
+--    - source_rfb_count_monthly uses report_period_all_frequencies (MONTHLY); deterministic at query time.
 --
 -- 3. ACCURACY:
---    - UNION (not UNION ALL) handles potential duplicates correctly
---    - Proper NULL handling in date comparisons
---    - Exact match to test case logic (DQ-024)
+--    - source_rfb_count_monthly replicates DQ-024 logic (eob_ranking + care_mgmt_ranking, UNION).
+--    - DMF returns |COUNT(target) - COUNT(source)|; expectation VALUE = 0.
 --
--- 4. MAINTAINABILITY:
---    - Clear CTE naming and comments
---    - Step-by-step logic matching test case structure
---    - Proper error handling (NULL-safe operations)
---
--- 5. PRODUCTION READINESS:
---    - Handles edge cases (empty config, no data)
---    - Returns 0 for match, >0 for mismatch (clear semantics)
---    - Uses report_period_all_frequencies (6 rows: DAILY, WEEKLY, MONTHLY, QUARTERLY, SEMI_ANNUAL, YEARLY)
---    - as_of_run_dt = CURRENT_DATE(); filter by frequency = 'MONTHLY' for this feed
---
--- 6. SNOWFLAKE-SPECIFIC:
---    - Uses QUALIFY (Snowflake-specific, more efficient than WHERE on window results)
---    - Leverages Snowflake's query optimizer (early filter pushdown)
---    - Follows DMF documentation patterns exactly
+-- 4. SNOWFLAKE-SPECIFIC:
+--    - QUALIFY in source view; follows DMF documentation patterns.
 -- =====================================================================
