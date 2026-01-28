@@ -3,6 +3,9 @@
 -- =====================================================================
 -- Purpose: Store monthly report periods for DMF execution
 -- Automatically generates monthly periods without manual intervention
+--
+-- Timestamps: report_start_date = 00:00:00.000, report_end_date = 23:59:59.997
+-- (start of day / end of day) for precise range comparisons.
 -- 
 -- Usage: This table stores report period metadata that can be used
 -- to set session variables or populate target table report period columns
@@ -19,8 +22,8 @@ SET config_table = 'report_period_config';
 
 CREATE TABLE IF NOT EXISTS IDENTIFIER($config_db || '.' || $config_schema || '.' || $config_table) (
     frequency VARCHAR(50) NOT NULL,
-    report_start_date DATE NOT NULL,
-    report_end_date DATE NOT NULL,
+    report_start_date TIMESTAMP_NTZ NOT NULL,
+    report_end_date TIMESTAMP_NTZ NOT NULL,
     as_of_run_dt DATE NOT NULL,
     carrier_name VARCHAR(255),
     created_dt TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
@@ -59,20 +62,21 @@ BEGIN
         month_end := LAST_DAY(month_start);
         
         -- Insert monthly period (ignore if already exists)
+        -- report_start_date = 00:00:00.000, report_end_date = 23:59:59.997
         INSERT INTO IDENTIFIER($config_db || '.' || $config_schema || '.' || $config_table)
             (frequency, report_start_date, report_end_date, as_of_run_dt, carrier_name)
         SELECT 
             'MONTHLY',
-            month_start,
-            month_end,
+            month_start::TIMESTAMP_NTZ,
+            DATEADD('millisecond', -3, (DATEADD('day', 1, month_end))::TIMESTAMP_NTZ),
             CURRENT_DATE(),
             carrier_name_param
         WHERE NOT EXISTS (
             SELECT 1 
             FROM IDENTIFIER($config_db || '.' || $config_schema || '.' || $config_table)
             WHERE frequency = 'MONTHLY'
-              AND report_start_date = month_start
-              AND report_end_date = month_end
+              AND report_start_date = month_start::TIMESTAMP_NTZ
+              AND report_end_date = DATEADD('millisecond', -3, (DATEADD('day', 1, month_end))::TIMESTAMP_NTZ)
               AND (carrier_name = carrier_name_param OR (carrier_name IS NULL AND carrier_name_param IS NULL))
         );
         
@@ -129,7 +133,7 @@ SELECT
     carrier_name
 FROM IDENTIFIER($config_db || '.' || $config_schema || '.' || $config_table)
 WHERE frequency = 'MONTHLY'
-  AND CURRENT_DATE() BETWEEN report_start_date AND report_end_date
+  AND CURRENT_TIMESTAMP() BETWEEN report_start_date AND report_end_date
 ORDER BY report_start_date DESC
 LIMIT 1;
 
@@ -137,48 +141,49 @@ LIMIT 1;
 -- STEP 5b: CREATE VIEW report_period_all_frequencies (6 ROWS, ONE PER FREQUENCY)
 -- =====================================================================
 -- Single view containing 6 records: DAILY, WEEKLY, MONTHLY, QUARTERLY, SEMI_ANNUAL, YEARLY
--- report_start_date / report_end_date = last period (we run last month's report this month, etc.)
+-- report_start_date / report_end_date = last period; timestamps:
+--   report_start_date = 00:00:00.000, report_end_date = 23:59:59.997
 -- as_of_run_dt = CURRENT_DATE() (when the view is queried)
 -- Use this view as DMF config TABLE; filter by frequency (e.g. MONTHLY) inside DMF or via wrapper views
 
 CREATE OR REPLACE VIEW IDENTIFIER($config_db || '.' || $config_schema || '.report_period_all_frequencies') AS
 WITH cd AS (SELECT CURRENT_DATE() AS d)
 SELECT 'DAILY'        AS frequency,
-       DATEADD('day', -1, d)    AS report_start_date,
-       DATEADD('day', -1, d)    AS report_end_date,
-       d                        AS as_of_run_dt,
-       CAST(NULL AS VARCHAR)    AS carrier_name
+       (DATEADD('day', -1, d))::TIMESTAMP_NTZ AS report_start_date,
+       DATEADD('millisecond', -3, (DATEADD('day', 1, DATEADD('day', -1, d)))::TIMESTAMP_NTZ) AS report_end_date,
+       d AS as_of_run_dt,
+       CAST(NULL AS VARCHAR) AS carrier_name
 FROM cd
 UNION ALL
 SELECT 'WEEKLY',
-       DATEADD('day', -7, DATE_TRUNC('week', d)),
-       DATEADD('day', -1, DATE_TRUNC('week', d)),
+       (DATEADD('day', -7, DATE_TRUNC('week', d)))::TIMESTAMP_NTZ,
+       DATEADD('millisecond', -3, (DATEADD('day', 1, DATEADD('day', -1, DATE_TRUNC('week', d))))::TIMESTAMP_NTZ),
        d, CAST(NULL AS VARCHAR)
 FROM cd
 UNION ALL
 SELECT 'MONTHLY',
-       ADD_MONTHS(DATE_TRUNC('month', d), -1),
-       LAST_DAY(ADD_MONTHS(DATE_TRUNC('month', d), -1)),
+       (ADD_MONTHS(DATE_TRUNC('month', d), -1))::TIMESTAMP_NTZ,
+       DATEADD('millisecond', -3, (DATEADD('day', 1, LAST_DAY(ADD_MONTHS(DATE_TRUNC('month', d), -1))))::TIMESTAMP_NTZ),
        d, CAST(NULL AS VARCHAR)
 FROM cd
 UNION ALL
 SELECT 'QUARTERLY',
-       ADD_MONTHS(DATE_TRUNC('quarter', d), -3),
-       LAST_DAY(ADD_MONTHS(DATE_TRUNC('quarter', d), -1)),
+       (ADD_MONTHS(DATE_TRUNC('quarter', d), -3))::TIMESTAMP_NTZ,
+       DATEADD('millisecond', -3, (DATEADD('day', 1, LAST_DAY(ADD_MONTHS(DATE_TRUNC('quarter', d), -1))))::TIMESTAMP_NTZ),
        d, CAST(NULL AS VARCHAR)
 FROM cd
 UNION ALL
 SELECT 'SEMI_ANNUAL',
-       CASE WHEN MONTH(d) <= 6 THEN DATE_FROM_PARTS(YEAR(d) - 1, 7, 1)
-            ELSE DATE_FROM_PARTS(YEAR(d), 1, 1) END,
-       CASE WHEN MONTH(d) <= 6 THEN DATE_FROM_PARTS(YEAR(d) - 1, 12, 31)
-            ELSE DATE_FROM_PARTS(YEAR(d), 6, 30) END,
+       (CASE WHEN MONTH(d) <= 6 THEN DATE_FROM_PARTS(YEAR(d) - 1, 7, 1)
+             ELSE DATE_FROM_PARTS(YEAR(d), 1, 1) END)::TIMESTAMP_NTZ,
+       DATEADD('millisecond', -3, (DATEADD('day', 1, CASE WHEN MONTH(d) <= 6 THEN DATE_FROM_PARTS(YEAR(d) - 1, 12, 31)
+             ELSE DATE_FROM_PARTS(YEAR(d), 6, 30) END))::TIMESTAMP_NTZ),
        d, CAST(NULL AS VARCHAR)
 FROM cd
 UNION ALL
 SELECT 'YEARLY',
-       DATE_FROM_PARTS(YEAR(d) - 1, 1, 1),
-       DATE_FROM_PARTS(YEAR(d) - 1, 12, 31),
+       (DATE_FROM_PARTS(YEAR(d) - 1, 1, 1))::TIMESTAMP_NTZ,
+       DATEADD('millisecond', -3, (DATEADD('day', 1, DATE_FROM_PARTS(YEAR(d) - 1, 12, 31)))::TIMESTAMP_NTZ),
        d, CAST(NULL AS VARCHAR)
 FROM cd;
 
@@ -199,11 +204,11 @@ FROM cd;
 -- View all 6 frequencies (report_period_all_frequencies; use as DMF config):
 -- SELECT * FROM IDENTIFIER($config_db || '.' || $config_schema || '.report_period_all_frequencies');
 
--- Get current month's period:
+-- Get current month's period (timestamps 00:00:00.000 / 23:59:59.997):
 -- SELECT report_start_date, report_end_date 
 -- FROM IDENTIFIER($config_db || '.' || $config_schema || '.' || $config_table)
 -- WHERE frequency = 'MONTHLY'
---   AND CURRENT_DATE() BETWEEN report_start_date AND report_end_date
+--   AND CURRENT_TIMESTAMP() BETWEEN report_start_date AND report_end_date
 -- LIMIT 1;
 
 -- Generate periods for specific carrier:
@@ -221,6 +226,7 @@ FROM cd;
 -- 3. Task automatically adds next month's period on 25th of each month
 -- 4. Primary key prevents duplicates
 -- 5. report_period_all_frequencies: single view with 6 rows (DAILY, WEEKLY, MONTHLY,
---    QUARTERLY, SEMI_ANNUAL, YEARLY). as_of_run_dt = CURRENT_DATE(). Use as DMF config.
+--    QUARTERLY, SEMI_ANNUAL, YEARLY). report_start_date = 00:00:00.000, report_end_date = 23:59:59.997.
+--    as_of_run_dt = CURRENT_DATE(). Use as DMF config.
 -- 6. Modify task schedule or procedure logic as needed for your requirements
 -- =====================================================================
