@@ -31,6 +31,7 @@
 #************************************
 # Standard library imports
 import argparse
+from typing import cast
 import logging
 import os
 import sys
@@ -131,7 +132,7 @@ class FileWriter:
             for column in self.dollar_columns:
                 logging.info(f"Applying dollar format to column: {column}")
                 if column in data.columns:
-                    col_idx = int(data.columns.get_loc(column)) + 1  # Get the column index (1-based)
+                    col_idx = cast(int, data.columns.get_loc(column)) + 1  # Get the column index (1-based)
                     column_letter = get_column_letter(col_idx)
                     for cell in ws[column_letter]:
                         cell.number_format = '$#,##0.00'
@@ -175,6 +176,9 @@ class FileWriter:
             if row == current_row:
                 cell.value = self.carrier_name
                 ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=last_column // 2)
+                cell.font = Font(name=name, size=size, bold=bold, color=color)
+                cell.alignment = Alignment(horizontal=alignment, wrap_text=wrap_text)
+                cell.fill = PatternFill(fill_type=fill_type, fgColor=fill_color)
 
                 # Add "timestamp" on the same row as carrier_name
                 time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -191,6 +195,9 @@ class FileWriter:
             elif row == current_row + 1:
                 cell.value = self.report_name
                 ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=last_column // 2)
+                cell.font = Font(name=name, size=size, bold=bold, color=color)
+                cell.alignment = Alignment(horizontal=alignment, wrap_text=wrap_text)
+                cell.fill = PatternFill(fill_type=fill_type, fgColor=fill_color)
 
                 # Add "Page 1 of 1" on the same row as report_name
                 page_info = f"Page {current_page} of {total_pages}"
@@ -204,12 +211,26 @@ class FileWriter:
                 page_cell.fill = PatternFill(fill_type=fill_type, fgColor=fill_color)
             else:
                 if self.report_start_dt and self.report_end_dt:
-                    start_date = datetime.strptime(self.report_start_dt, '%Y-%m-%d %H:%M:%S.%f').strftime("%m/%d/%Y")
-                    end_date = datetime.strptime(self.report_end_dt, '%Y-%m-%d %H:%M:%S.%f').strftime("%m/%d/%Y")
+                    try:
+                        start_date = datetime.strptime(self.report_start_dt, '%Y-%m-%d %H:%M:%S.%f').strftime("%m/%d/%Y")
+                    except ValueError:
+                        start_date = datetime.strptime(self.report_start_dt, '%Y-%m-%d %H:%M:%S').strftime("%m/%d/%Y")
+                    try:
+                        end_date = datetime.strptime(self.report_end_dt, '%Y-%m-%d %H:%M:%S.%f').strftime("%m/%d/%Y")
+                    except ValueError:
+                        end_date = datetime.strptime(self.report_end_dt, '%Y-%m-%d %H:%M:%S').strftime("%m/%d/%Y")
                     cell.value = f"For Dates: {start_date} To {end_date}"
-                else:
-                    report_date = datetime.strptime(self.report_run_dt, '%Y-%m-%d %H:%M:%S.%f').strftime("%m/%d/%Y")
+                elif self.report_run_dt:
+                    try:
+                        report_date = datetime.strptime(self.report_run_dt, '%Y-%m-%d %H:%M:%S.%f').strftime("%m/%d/%Y")
+                    except ValueError:
+                        try:
+                            report_date = datetime.strptime(self.report_run_dt, '%Y-%m-%d %H:%M:%S').strftime("%m/%d/%Y")
+                        except ValueError:
+                            report_date = self.report_run_dt
                     cell.value = f"Report as Date: {report_date}"
+                else:
+                    cell.value = f"Report as Date: {datetime.now().strftime('%m/%d/%Y')}"
                 ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=last_column)
                 cell.font = Font(name=name, size=size, bold=bold, color=color)
                 cell.alignment = Alignment(horizontal=alignment, wrap_text=wrap_text)
@@ -336,6 +357,11 @@ def validate_report(report):
             logging.error(f"Error: {key} key is missing in the report configuration file.")
             sys.exit(1)
 
+    if report.get('header'):
+        if not report.get('sheet_header_font'):
+            logging.error("Error: sheet_header_font is required when header is True.")
+            sys.exit(1)
+
 
 def parse_and_validate_args():
     """parse and validate command line arguments"""
@@ -412,7 +438,13 @@ def main():
     report_name = report['report_name']
     tables_config = report['tables']
     # sheetnames = report['sheetnames']
-    pre_sql_query = report['pre_sql_query'].format(carrier_name=args.carrier_name, as_of_run_dt=args.as_of_run_dt, report_start_dt=args.report_start_dt, report_end_dt=args.report_end_dt)
+    pre_sql_query = report['pre_sql_query'].format(
+            carrier_name=args.carrier_name,
+            as_of_run_dt=args.as_of_run_dt,
+            report_start_dt=args.report_start_dt,
+            report_end_dt=args.report_end_dt,
+            report_run_dt=args.report_run_dt,
+        )
 
     # optional keys in config file
     date_columns = report.get('date_columns', None)
