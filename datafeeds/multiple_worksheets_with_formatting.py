@@ -131,7 +131,7 @@ class FileWriter:
             for column in self.dollar_columns:
                 logging.info(f"Applying dollar format to column: {column}")
                 if column in data.columns:
-                    col_idx = data.columns.get_loc(column) + 1  # Get the column index (1-based)
+                    col_idx = int(data.columns.get_loc(column)) + 1  # Get the column index (1-based)
                     column_letter = get_column_letter(col_idx)
                     for cell in ws[column_letter]:
                         cell.number_format = '$#,##0.00'
