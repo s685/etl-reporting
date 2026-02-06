@@ -188,36 +188,35 @@ class FileWriter:
         # add table data, get the data from the dataframe for each group
         for group in data[self.grouping_column].unique():
             group_data = data[data[self.grouping_column] == group].sort_values(by=self.sorting_columns)
-        # add group total
-        if self.report_name == 'Claims Paid Report':
-            group_total = group_data.groupby(by=self.grouping_column).agg({'Claimants':'sum', 'Amount Paid':'sum'}).reset_index()
-            group_total['Avg Paid Per Claimant'] = (group_data['Amount Paid'].sum()) / (group_data['Claimants'].sum())
-        else:
-            group_total = group_data.groupby(by=self.grouping_column).sum().reset_index()
-            group_total = group_total.reindex(columns=group_data.columns, fill_value='')
-            group_total[self.sorting_columns] = ''
+            # add group total
+            if self.report_name == 'Claims Paid Report':
+                group_total = group_data.groupby(by=self.grouping_column).agg({'Claimants':'sum', 'Amount Paid':'sum'}).reset_index()
+                group_total['Avg Paid Per Claimant'] = (group_data['Amount Paid'].sum()) / (group_data['Claimants'].sum())
+            else:
+                group_total = group_data.groupby(by=self.grouping_column).sum().reset_index()
+                group_total = group_total.reindex(columns=group_data.columns, fill_value='')
+                group_total[self.sorting_columns] = ''
 
-        # add group total to the group data
-        group_data = pd.concat([group_data, group_total], ignore_index=False)
-        group_data.reset_index(drop=True, inplace=True)
+            # add group total to the group data
+            group_data = pd.concat([group_data, group_total], ignore_index=False)
+            group_data.reset_index(drop=True, inplace=True)
 
-        group_data[self.grouping_column] = group_data.apply(lambda row: group if row.name == group_data.index[0] else '', axis=1)
-        # print(group_data)
+            group_data[self.grouping_column] = group_data.apply(lambda row: group if row.name == group_data.index[0] else '', axis=1)
 
-        total_rows = len(group_data)
-        for row_index, row in enumerate(group_data.itertuples(index=False), start=1):
-            current_row += 1
-            for col, value in enumerate(row, start=1):
-                cell = ws.cell(row=current_row, column=col)
-                cell.value = value
-                cell.font = Font(name='Arial', size=8, bold=False, color='000000')
-                cell.alignment = Alignment(horizontal='right', wrap_text=wrap_text)
-
-                if row_index == total_rows:
-                    cell.font = Font(name=name, size=size, bold=bold, color=color)
+            total_rows = len(group_data)
+            for row_index, row in enumerate(group_data.itertuples(index=False), start=1):
+                current_row += 1
+                for col, value in enumerate(row, start=1):
+                    cell = ws.cell(row=current_row, column=col)
+                    cell.value = value
+                    cell.font = Font(name='Arial', size=8, bold=False, color='000000')
                     cell.alignment = Alignment(horizontal='right', wrap_text=wrap_text)
 
-        # add total row for the entire data
+                    if row_index == total_rows:
+                        cell.font = Font(name=name, size=size, bold=bold, color=color)
+                        cell.alignment = Alignment(horizontal='right', wrap_text=wrap_text)
+
+        # add total row for the entire data (once, after all groups written)
         if self.report_name == 'Claims Paid Activity':
             data_total = data.sum().to_frame().T
             data_total = data_total.reindex(columns=data.columns, fill_value='')
@@ -244,8 +243,6 @@ class FileWriter:
         elif self.report_name == 'Claims Paid Report':
             # group the data by sorting columns and sum across numeric columns to get the total for each unique value in the sorting columns
             data_category_total = data.groupby(by=self.sorting_columns).agg({'Claimants':'sum', 'Amount Paid':'sum', 'Avg Paid Per Claimant':'sum'})
-            print(data_category_total)
-
             data_category_total = data_category_total.reindex(columns=data.columns, fill_value='').sort_values(by=self.sorting_columns)
             data_category_total[self.grouping_column] = 'Totals for All Groups'
             data_category_total[self.grouping_column] = group_data.apply(lambda row: 'Totals for All Groups' if row.name == group_data.index[0] else '', axis=1)
