@@ -177,11 +177,17 @@ class FileWriter:
             wb.save(os.path.join(self.output_path, self.output_file))
             return
 
+        # Ensure grouping column is string for consistent handling of mixed types (float, Decimal, str)
+        # Backend may return numeric GROUP_NAME (e.g. 1.5, 2.0) and string (e.g. "NYL My Care")
+        if self.grouping_column and self.grouping_column in data.columns:
+            data = data.copy()
+            data[self.grouping_column] = data[self.grouping_column].apply(
+                lambda x: '' if pd.isna(x) else str(x).strip()
+            )
+
         # add table data, get the data from the dataframe for each group
         for group in data[self.grouping_column].unique():
             group_data = data[data[self.grouping_column] == group].sort_values(by=self.sorting_columns)
-
-        print(group_data)
         # add group total
         if self.report_name == 'Claims Paid Report':
             group_total = group_data.groupby(by=self.grouping_column).agg({'Claimants':'sum', 'Amount Paid':'sum'}).reset_index()
