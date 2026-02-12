@@ -28,6 +28,34 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CLEANUP TRAP — Safety net for unexpected exits
+# ─────────────────────────────────────────────────────────────────────────────
+_cleanup_on_exit() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        echo ""
+        echo -e "\033[0;31m  ✖ Script exited unexpectedly (exit code: $exit_code).\033[0m"
+        local git_dir
+        git_dir=$(git rev-parse --git-dir 2>/dev/null || echo "")
+        if [[ -n "$git_dir" ]]; then
+            # Detect in-progress rebase
+            if [[ -d "$git_dir/rebase-merge" || -d "$git_dir/rebase-apply" ]]; then
+                echo -e "\033[1;33m  ⚠ A rebase is in progress.\033[0m"
+                echo -e "\033[2m    Resolve conflicts and run: git rebase --continue\033[0m"
+                echo -e "\033[2m    Or abort with: git rebase --abort\033[0m"
+            fi
+            # Detect dangling auto-stash
+            if git stash list 2>/dev/null | grep -q "auto-stash"; then
+                echo -e "\033[1;33m  ⚠ Auto-stashed changes detected in stash.\033[0m"
+                echo -e "\033[2m    Run 'git stash pop' to restore your work.\033[0m"
+            fi
+        fi
+        echo ""
+    fi
+}
+trap _cleanup_on_exit EXIT
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 PROTECTED_BRANCHES=("main" "development")
@@ -295,35 +323,72 @@ create_feature_branch() {
 
     # Ensure base branch is up-to-date
     if branch_exists_local "$base_branch"; then
-        git checkout "$base_branch" --quiet
+        if ! git checkout "$base_branch" --quiet; then
+            error "Failed to checkout '$base_branch'."
+            if $stashed; then
+                warn "Your changes are in the stash. Use 'git stash pop' to restore."
+            fi
+            return 1
+        fi
         if check_remote; then
             info "Pulling latest $base_branch from $REMOTE..."
-            git pull --rebase "$REMOTE" "$base_branch" --quiet 2>/dev/null || true
+            if ! git pull --rebase "$REMOTE" "$base_branch" --quiet; then
+                error "Rebase conflict while updating '$base_branch'!"
+                warn "Resolve conflicts, then run:"
+                dim "  git add <resolved-files>"
+                dim "  git rebase --continue"
+                warn "Or abort with:"
+                dim "  git rebase --abort"
+                if $stashed; then
+                    warn "Your changes are in the stash. Use 'git stash pop' after resolving."
+                fi
+                return 1
+            fi
         fi
     else
         # Base branch only exists on remote — track it
         info "Checking out $base_branch from $REMOTE..."
-        git checkout -b "$base_branch" "$REMOTE/$base_branch" --quiet
+        if ! git checkout -b "$base_branch" "$REMOTE/$base_branch" --quiet; then
+            error "Failed to checkout '$base_branch' from remote."
+            if $stashed; then
+                warn "Your changes are in the stash. Use 'git stash pop' to restore."
+            fi
+            return 1
+        fi
     fi
 
     # Create and switch to new branch
-    git checkout -b "$full_branch_name"
+    if ! git checkout -b "$full_branch_name"; then
+        error "Failed to create branch '$full_branch_name'."
+        if $stashed; then
+            warn "Your changes are in the stash. Use 'git stash pop' to restore."
+        fi
+        return 1
+    fi
 
     info "Branch '$full_branch_name' created from '$base_branch'"
 
     # Push branch to remote and set upstream
     if check_remote; then
         if confirm "Push new branch to remote and set upstream tracking?"; then
-            git push -u "$REMOTE" "$full_branch_name"
-            info "Branch pushed to $REMOTE with upstream tracking."
+            if ! git push -u "$REMOTE" "$full_branch_name"; then
+                error "Failed to push branch to $REMOTE."
+                warn "You can retry manually: git push -u $REMOTE $full_branch_name"
+            else
+                info "Branch pushed to $REMOTE with upstream tracking."
+            fi
         fi
     fi
 
     # Restore stash if applicable
     if $stashed; then
         if confirm "Restore stashed changes?"; then
-            git stash pop
-            info "Stashed changes restored."
+            if ! git stash pop; then
+                warn "Stash pop resulted in merge conflicts."
+                warn "Resolve the conflicts manually, then run 'git stash drop' to remove the stash entry."
+            else
+                info "Stashed changes restored."
+            fi
         else
             warn "Stash preserved. Use 'git stash pop' to restore later."
         fi
@@ -514,9 +579,17 @@ commit_and_push() {
     fi
 
     if [[ -n "$commit_body" ]]; then
-        git commit -m "$commit_msg" -m "$commit_body"
+        if ! git commit -m "$commit_msg" -m "$commit_body"; then
+            error "Commit failed (pre-commit hook rejection or other error)."
+            warn "Fix the issues reported above and try again."
+            return 1
+        fi
     else
-        git commit -m "$commit_msg"
+        if ! git commit -m "$commit_msg"; then
+            error "Commit failed (pre-commit hook rejection or other error)."
+            warn "Fix the issues reported above and try again."
+            return 1
+        fi
     fi
 
     info "Committed successfully."
@@ -536,7 +609,11 @@ commit_and_push() {
     if [[ -z "$upstream" ]]; then
         info "No upstream set. Will push and set upstream."
         if confirm "Push '$branch' to $REMOTE and set upstream?"; then
-            git push -u "$REMOTE" "$branch"
+            if ! git push -u "$REMOTE" "$branch"; then
+                error "Push failed."
+                warn "Retry manually: git push -u $REMOTE $branch"
+                return 1
+            fi
             info "Pushed with upstream tracking set."
         fi
     else
@@ -551,7 +628,11 @@ commit_and_push() {
                     return 0
                 fi
             fi
-            git push
+            if ! git push; then
+                error "Push failed."
+                warn "Retry manually: git push"
+                return 1
+            fi
             info "Pushed successfully."
         fi
     fi
@@ -660,10 +741,15 @@ sync_feature_branch() {
         return 1
     fi
 
+    local stashed=false
     if has_uncommitted_changes; then
         warn "You have uncommitted changes. Please commit or stash first."
         if confirm "Auto-stash changes?"; then
-            git stash push -m "auto-stash before sync" --include-untracked
+            if ! git stash push -m "auto-stash before sync" --include-untracked; then
+                error "Failed to stash changes."
+                return 1
+            fi
+            stashed=true
         else
             return 1
         fi
@@ -705,19 +791,46 @@ sync_feature_branch() {
     # Fetch and update base branch
     fetch_latest
     info "Updating $base from $REMOTE..."
-    git checkout "$base" --quiet
-    git pull --rebase "$REMOTE" "$base" --quiet 2>/dev/null || true
+    if ! git checkout "$base" --quiet; then
+        error "Failed to checkout '$base'."
+        if $stashed; then
+            warn "Your changes are in the stash. Use 'git stash pop' to restore."
+        fi
+        return 1
+    fi
+    if ! git pull --rebase "$REMOTE" "$base" --quiet; then
+        error "Rebase conflict while updating '$base'!"
+        warn "Resolve conflicts, then run:"
+        dim "  git add <resolved-files>"
+        dim "  git rebase --continue"
+        warn "Or abort with:"
+        dim "  git rebase --abort"
+        if $stashed; then
+            warn "Your changes are in the stash. Use 'git stash pop' after resolving."
+        fi
+        return 1
+    fi
 
     # Switch back and rebase
-    git checkout "$branch" --quiet
+    if ! git checkout "$branch" --quiet; then
+        error "Failed to checkout '$branch'."
+        if $stashed; then
+            warn "Your changes are in the stash. Use 'git stash pop' to restore."
+        fi
+        return 1
+    fi
     info "Rebasing '$branch' onto '$base'..."
 
     if git rebase "$base"; then
         info "Rebase successful. '$branch' is now up-to-date with '$base'."
 
         if confirm "Force-push rebased branch to remote?"; then
-            git push --force-with-lease "$REMOTE" "$branch"
-            info "Force-pushed with lease (safe force push)."
+            if ! git push --force-with-lease "$REMOTE" "$branch"; then
+                error "Force-push failed."
+                warn "Retry manually: git push --force-with-lease $REMOTE $branch"
+            else
+                info "Force-pushed with lease (safe force push)."
+            fi
         fi
     else
         error "Rebase conflict detected!"
@@ -729,13 +842,22 @@ sync_feature_branch() {
         warn "Or abort with:"
         dim "  git rebase --abort"
         echo ""
+        if $stashed; then
+            warn "Your changes are in the stash. Use 'git stash pop' after resolving."
+        fi
     fi
 
     # Restore stash if we auto-stashed
-    if git stash list | grep -q "auto-stash before sync"; then
+    if $stashed; then
         if confirm "Restore auto-stashed changes?"; then
-            git stash pop
-            info "Stashed changes restored."
+            if ! git stash pop; then
+                warn "Stash pop resulted in merge conflicts."
+                warn "Resolve the conflicts manually, then run 'git stash drop' to remove the stash entry."
+            else
+                info "Stashed changes restored."
+            fi
+        else
+            warn "Stash preserved. Use 'git stash pop' to restore later."
         fi
     fi
 }
@@ -790,14 +912,32 @@ merge_feature_to_base() {
     print_section "Step 1: Rebase '$feature_branch' onto latest '$target'"
 
     fetch_latest
-    git checkout "$target" --quiet
-    git pull --rebase "$REMOTE" "$target" --quiet 2>/dev/null || true
-    git checkout "$feature_branch" --quiet
+    if ! git checkout "$target" --quiet; then
+        error "Failed to checkout '$target'."
+        return 1
+    fi
+    if ! git pull --rebase "$REMOTE" "$target" --quiet; then
+        error "Rebase conflict while updating '$target'!"
+        warn "Resolve conflicts, then run:"
+        dim "  git add <resolved-files>"
+        dim "  git rebase --continue"
+        warn "Or abort with:"
+        dim "  git rebase --abort"
+        return 1
+    fi
+    if ! git checkout "$feature_branch" --quiet; then
+        error "Failed to checkout '$feature_branch'."
+        return 1
+    fi
 
     info "Rebasing '$feature_branch' onto '$target'..."
     if ! git rebase "$target"; then
         error "Rebase conflict! Resolve conflicts first, then retry merge."
-        warn "Run: git rebase --abort  to undo"
+        warn "Resolve conflicts, then run:"
+        dim "  git add <resolved-files>"
+        dim "  git rebase --continue"
+        warn "Or abort with:"
+        dim "  git rebase --abort"
         return 1
     fi
     info "Rebase complete. Linear history ensured."
@@ -805,7 +945,10 @@ merge_feature_to_base() {
     # ── Fast-forward merge into target ──────────────────────────────────
     print_section "Step 2: Fast-Forward Merge into '$target'"
 
-    git checkout "$target" --quiet
+    if ! git checkout "$target" --quiet; then
+        error "Failed to checkout '$target'."
+        return 1
+    fi
 
     if git merge --ff-only "$feature_branch"; then
         info "Fast-forward merge successful!"
@@ -813,8 +956,12 @@ merge_feature_to_base() {
 
         # Push
         if confirm "Push '$target' to $REMOTE?"; then
-            git push "$REMOTE" "$target"
-            info "'$target' pushed to $REMOTE."
+            if ! git push "$REMOTE" "$target"; then
+                error "Push failed."
+                warn "Retry manually: git push $REMOTE $target"
+            else
+                info "'$target' pushed to $REMOTE."
+            fi
         fi
 
         # Cleanup
@@ -831,7 +978,7 @@ merge_feature_to_base() {
         error "Fast-forward merge not possible!"
         error "This means '$feature_branch' is not a direct descendant of '$target'."
         warn "Run 'Sync Feature Branch' first to rebase."
-        git checkout "$feature_branch" --quiet
+        git checkout "$feature_branch" --quiet || warn "Failed to switch back to '$feature_branch'."
         return 1
     fi
 
@@ -862,9 +1009,15 @@ stash_management() {
             prompt "Stash message (optional): "
             read -r stash_msg
             if [[ -n "$stash_msg" ]]; then
-                git stash push -m "$stash_msg" --include-untracked
+                if ! git stash push -m "$stash_msg" --include-untracked; then
+                    error "Failed to stash changes."
+                    return
+                fi
             else
-                git stash push --include-untracked
+                if ! git stash push --include-untracked; then
+                    error "Failed to stash changes."
+                    return
+                fi
             fi
             info "Changes stashed."
             ;;
@@ -879,17 +1032,41 @@ stash_management() {
             fi
             ;;
         3)
-            git stash apply && info "Latest stash applied." || error "No stash to apply."
+            if git stash apply; then
+                info "Latest stash applied."
+            else
+                error "Stash apply failed — conflicts may need manual resolution."
+                warn "Resolve conflicts, then run 'git stash drop' to remove the applied stash entry."
+            fi
             ;;
         4)
-            git stash pop && info "Latest stash popped." || error "No stash to pop."
+            if git stash pop; then
+                info "Latest stash popped."
+            else
+                error "Stash pop failed — conflicts may need manual resolution."
+                warn "Resolve conflicts, then run 'git stash drop' to remove the applied stash entry."
+            fi
             ;;
         5)
-            git stash list
+            local drop_list
+            drop_list=$(git stash list 2>/dev/null)
+            if [[ -z "$drop_list" ]]; then
+                info "No stashes to drop."
+                return
+            fi
+            echo "$drop_list"
             echo ""
             prompt "Enter stash index to drop (e.g. 0): "
             read -r stash_idx
-            git stash drop "stash@{$stash_idx}" && info "Stash dropped." || error "Invalid stash index."
+            if [[ ! "$stash_idx" =~ ^[0-9]+$ ]]; then
+                error "Invalid stash index. Must be a number."
+                return
+            fi
+            if ! git stash drop "stash@{$stash_idx}"; then
+                error "Failed to drop stash@{$stash_idx}. Check 'git stash list' for valid indices."
+            else
+                info "Stash @{$stash_idx} dropped."
+            fi
             ;;
         6)
             if confirm "Drop ALL stashes? This cannot be undone."; then
@@ -1048,8 +1225,12 @@ branch_cleanup() {
             fi
             ;;
         3)
-            git fetch --prune
-            info "Stale remote-tracking branches pruned."
+            if ! git fetch --prune; then
+                error "Fetch failed — remote may not be reachable."
+                warn "Check your network connection and try again."
+            else
+                info "Stale remote-tracking branches pruned."
+            fi
             ;;
         *)
             error "Invalid selection."
@@ -1090,14 +1271,14 @@ main_menu() {
         read -r choice
 
         case "$choice" in
-            1) create_feature_branch ;;
-            2) commit_and_push ;;
-            3) sync_feature_branch ;;
-            4) merge_feature_to_base ;;
-            5) stash_management ;;
-            6) view_log ;;
-            7) setup_linear_history ;;
-            8) branch_cleanup ;;
+            1) create_feature_branch || warn "Operation did not complete successfully." ;;
+            2) commit_and_push || warn "Operation did not complete successfully." ;;
+            3) sync_feature_branch || warn "Operation did not complete successfully." ;;
+            4) merge_feature_to_base || warn "Operation did not complete successfully." ;;
+            5) stash_management || warn "Operation did not complete successfully." ;;
+            6) view_log || warn "Operation did not complete successfully." ;;
+            7) setup_linear_history || warn "Operation did not complete successfully." ;;
+            8) branch_cleanup || warn "Operation did not complete successfully." ;;
             q|Q) echo ""; info "Goodbye!"; echo ""; exit 0 ;;
             *) error "Invalid selection. Try again." ;;
         esac
