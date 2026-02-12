@@ -130,6 +130,28 @@ current_branch() {
     git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED"
 }
 
+# Get stored base branch for current branch (set when creating feature branch)
+get_stored_base_branch() {
+    local branch
+    branch=$(current_branch)
+    git config --get "branch.${branch}.base" 2>/dev/null || true
+}
+
+# Check if in rebase state (conflict or mid-rebase)
+in_rebase_state() {
+    [[ -d "$(git rev-parse --git-dir)/rebase-merge" ]] || [[ -d "$(git rev-parse --git-dir)/rebase-apply" ]]
+}
+
+# Check if in merge conflict state
+in_merge_state() {
+    [[ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]]
+}
+
+# List conflicted files (unmerged)
+get_conflicted_files() {
+    git diff --name-only --diff-filter=U 2>/dev/null || true
+}
+
 # Check for uncommitted changes
 has_uncommitted_changes() {
     ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null
@@ -146,20 +168,45 @@ fetch_latest() {
     git fetch "$REMOTE" --prune --quiet 2>/dev/null || warn "Fetch failed — working offline."
 }
 
-# Display current repo status summary
+# Handle rebase conflict: list files, offer resolve flow
+_handle_rebase_conflict() {
+    local branch="$1" base="$2"
+    local conflicted
+    conflicted=$(get_conflicted_files)
+    error "Rebase conflict detected!"
+    echo ""
+    if [[ -n "$conflicted" ]]; then
+        echo -e "  ${BOLD}Conflicted files:${NC}"
+        echo "$conflicted" | sed 's/^/    /'
+        echo ""
+    fi
+    warn "Steps to resolve:"
+    dim "  1. Edit conflicted files and remove <<<<<<<, =======, >>>>>>> markers"
+    dim "  2. git add <resolved-files>"
+    dim "  3. git rebase --continue"
+    dim "  Or: git rebase --abort  to undo and return to previous state"
+    echo ""
+    if [[ -n "$conflicted" ]] && confirm "Open conflict resolution menu now?"; then
+        resolve_conflicts
+    fi
+}
+
+# Display current repo status summary (single git call for speed)
 show_status_summary() {
-    local branch
+    local branch staged modified untracked
     branch=$(current_branch)
-    local modified untracked staged
-    modified=$(git diff --name-only 2>/dev/null | wc -l | tr -d ' ')
-    staged=$(git diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')
-    untracked=$(git ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')
+    read -r staged modified untracked <<< "$(git status --porcelain 2>/dev/null | awk '
+        /^\?\?/ { u++ }
+        /^[MADRC]/ { s++ }
+        /^.[MD ]|^ [MD]/ { if ($0 !~ /^\?\?/) m++ }
+        END { print s+0, m+0, u+0 }
+    ')"
 
     echo ""
     echo -e "  ${BOLD}Branch:${NC}    $branch"
-    echo -e "  ${BOLD}Staged:${NC}    $staged file(s)"
-    echo -e "  ${BOLD}Modified:${NC}  $modified file(s)"
-    echo -e "  ${BOLD}Untracked:${NC} $untracked file(s)"
+    echo -e "  ${BOLD}Staged:${NC}    ${staged:-0} file(s)"
+    echo -e "  ${BOLD}Modified:${NC}  ${modified:-0} file(s)"
+    echo -e "  ${BOLD}Untracked:${NC} ${untracked:-0} file(s)"
     echo ""
 }
 
@@ -309,7 +356,9 @@ create_feature_branch() {
     # Create and switch to new branch
     git checkout -b "$full_branch_name"
 
-    info "Branch '$full_branch_name' created from '$base_branch'"
+    # Store base branch for Sync and conflict workflows (avoids merge conflicts)
+    git config "branch.$full_branch_name.base" "$base_branch"
+    info "Branch '$full_branch_name' created from '$base_branch' (base stored for Sync)"
 
     # Push branch to remote and set upstream
     if check_remote; then
@@ -529,9 +578,23 @@ commit_and_push() {
         return 0
     fi
 
-    # Check if upstream is set
+    # Pre-push: check if remote has new commits (avoids rejection, keeps linear history)
     local upstream
     upstream=$(git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null || echo "")
+    if [[ -n "$upstream" ]]; then
+        fetch_latest 2>/dev/null || true
+        local behind
+        behind=$(git rev-list --count "HEAD..@{upstream}" 2>/dev/null || echo "0")
+        if [[ "${behind:-0}" -gt 0 ]]; then
+            warn "Remote has $behind new commit(s). Push may be rejected."
+            warn "Run 'Sync Feature Branch' (option 3) first to rebase, then push."
+            if ! confirm "Push anyway? (may fail)"; then
+                return 0
+            fi
+        fi
+    fi
+
+    # Check if upstream is set
 
     if [[ -z "$upstream" ]]; then
         info "No upstream set. Will push and set upstream."
@@ -669,38 +732,49 @@ sync_feature_branch() {
         fi
     fi
 
-    # Detect base branch from branch naming convention
-    # Or ask user
-    print_section "Select Base Branch to Sync From"
-
-    local base_branches=()
-    for b in "development" "main"; do
-        branch_exists_local "$b" && base_branches+=("$b")
-    done
-    while IFS= read -r rb; do
-        [[ -n "$rb" ]] && base_branches+=("$rb")
-    done < <(git branch --list 'release/*' 2>/dev/null | sed 's|^[* ]*||')
-
-    if [[ ${#base_branches[@]} -eq 0 ]]; then
-        error "No base branches found."
-        return 1
+    # Use stored base branch if available (set when creating feature branch)
+    local base=""
+    local stored_base
+    stored_base=$(get_stored_base_branch)
+    if [[ -n "$stored_base" ]] && branch_exists_local "$stored_base"; then
+        info "Stored base branch: $stored_base"
+        if confirm "Use stored base '$stored_base'? (N = select different base)"; then
+            base="$stored_base"
+        fi
     fi
 
-    echo ""
-    for i in "${!base_branches[@]}"; do
-        echo -e "    ${BOLD}$((i+1)))${NC} ${base_branches[$i]}"
-    done
-    echo ""
+    if [[ -z "$base" ]]; then
+        print_section "Select Base Branch to Sync From"
+        local base_branches=()
+        for b in "development" "main"; do
+            branch_exists_local "$b" && base_branches+=("$b")
+        done
+        while IFS= read -r rb; do
+            [[ -n "$rb" ]] && base_branches+=("$rb")
+        done < <(git branch --list 'release/*' 2>/dev/null | sed 's|^[* ]*||')
 
-    prompt "Select base branch [1-${#base_branches[@]}]: "
-    read -r selection
+        if [[ ${#base_branches[@]} -eq 0 ]]; then
+            error "No base branches found."
+            return 1
+        fi
 
-    if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#base_branches[@]} )); then
-        error "Invalid selection."
-        return 1
+        echo ""
+        for i in "${!base_branches[@]}"; do
+            echo -e "    ${BOLD}$((i+1)))${NC} ${base_branches[$i]}"
+        done
+        echo ""
+
+        prompt "Select base branch [1-${#base_branches[@]}]: "
+        read -r selection
+
+        if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#base_branches[@]} )); then
+            error "Invalid selection."
+            return 1
+        fi
+
+        base="${base_branches[$((selection-1))]}"
+        git config "branch.$branch.base" "$base"
     fi
-
-    local base="${base_branches[$((selection-1))]}"
 
     # Fetch and update base branch
     fetch_latest
@@ -720,15 +794,7 @@ sync_feature_branch() {
             info "Force-pushed with lease (safe force push)."
         fi
     else
-        error "Rebase conflict detected!"
-        echo ""
-        warn "Resolve conflicts, then run:"
-        dim "  git add <resolved-files>"
-        dim "  git rebase --continue"
-        echo ""
-        warn "Or abort with:"
-        dim "  git rebase --abort"
-        echo ""
+        _handle_rebase_conflict "$branch" "$base"
     fi
 
     # Restore stash if we auto-stashed
@@ -796,8 +862,7 @@ merge_feature_to_base() {
 
     info "Rebasing '$feature_branch' onto '$target'..."
     if ! git rebase "$target"; then
-        error "Rebase conflict! Resolve conflicts first, then retry merge."
-        warn "Run: git rebase --abort  to undo"
+        _handle_rebase_conflict "$feature_branch" "$target"
         return 1
     fi
     info "Rebase complete. Linear history ensured."
@@ -1057,6 +1122,103 @@ branch_cleanup() {
     esac
 }
 
+# ═════════════════════════════════════════════════════════════════════════════
+# 9. RESOLVE REBASE/MERGE CONFLICTS
+# ═════════════════════════════════════════════════════════════════════════════
+resolve_conflicts() {
+    print_header "Resolve Rebase/Merge Conflicts"
+
+    if ! in_rebase_state && ! in_merge_state; then
+        info "No rebase or merge in progress. Working tree is clean."
+        return 0
+    fi
+
+    local conflicted
+    conflicted=$(get_conflicted_files)
+    local op="rebase"
+    in_merge_state && op="merge"
+
+    echo -e "  ${BOLD}Status:${NC} $op in progress"
+    if [[ -n "$conflicted" ]]; then
+        echo -e "  ${BOLD}Conflicted files:${NC}"
+        echo "$conflicted" | sed 's/^/    /'
+        echo ""
+        echo -e "    ${BOLD}1)${NC} Stage all resolved files and continue"
+        echo -e "    ${BOLD}2)${NC} Stage specific file(s)"
+        echo -e "    ${BOLD}3)${NC} Show conflict summary (git diff --check)"
+        echo -e "    ${BOLD}4)${NC} Abort $op and return to previous state"
+        echo ""
+        prompt "Selection [1-4]: "
+        read -r choice
+        case "$choice" in
+            1)
+                git add -A
+                if in_rebase_state; then
+                    if git rebase --continue 2>/dev/null; then
+                        info "Rebase completed successfully."
+                    else
+                        warn "More conflicts. Resolve remaining files and run option 1 again."
+                    fi
+                else
+                    if git -c core.editor=true merge --continue 2>/dev/null; then
+                        info "Merge completed successfully."
+                    else
+                        warn "Fix any issues and run: git merge --continue"
+                    fi
+                fi
+                ;;
+            2)
+                echo ""
+                local i=1
+                local files=()
+                while IFS= read -r f; do
+                    [[ -n "$f" ]] && files+=("$f") && echo -e "    ${BOLD}$i)${NC} $f" && ((i++))
+                done <<< "$conflicted"
+                echo ""
+                prompt "Enter file number(s) to stage (e.g. 1 3): "
+                read -r nums
+                for n in $nums; do
+                    if [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= ${#files[@]} )); then
+                        git add "${files[$((n-1))]}"
+                        info "Staged: ${files[$((n-1))]}"
+                    fi
+                done
+                if in_rebase_state; then
+                    prompt "Continue rebase now? [y/N]: "
+                    read -r cont
+                    [[ "$cont" =~ ^[Yy]$ ]] && git rebase --continue 2>/dev/null && info "Rebase continued."
+                fi
+                ;;
+            3)
+                echo ""
+                git diff --check 2>/dev/null | head -20 || true
+                echo ""
+                ;;
+            4)
+                if confirm "Abort $op? All $op progress will be lost."; then
+                    if in_rebase_state; then
+                        git rebase --abort
+                        info "Rebase aborted."
+                    else
+                        git merge --abort
+                        info "Merge aborted."
+                    fi
+                fi
+                ;;
+            *)
+                error "Invalid selection."
+                ;;
+        esac
+    else
+        warn "No conflicted files found, but $op is in progress."
+        dim "Run: git add <files> && git ${op} --continue"
+        if confirm "Abort $op?"; then
+            if in_rebase_state; then git rebase --abort; else git merge --abort; fi
+            info "Aborted."
+        fi
+    fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN MENU
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1073,6 +1235,9 @@ main_menu() {
         else
             echo -e "  ${BOLD}Type:${NC}       ${GREEN}feature/work${NC}"
         fi
+        if in_rebase_state || in_merge_state; then
+            echo -e "  ${BOLD}Conflict:${NC}   ${YELLOW}REBASE/MERGE IN PROGRESS — resolve conflicts (option 9)${NC}"
+        fi
         show_status_summary
 
         echo -e "    ${BOLD}1)${NC} Create Feature Branch"
@@ -1083,6 +1248,7 @@ main_menu() {
         echo -e "    ${BOLD}6)${NC} View Log / History"
         echo -e "    ${BOLD}7)${NC} Setup Linear History Config (one-time)"
         echo -e "    ${BOLD}8)${NC} Branch Cleanup"
+        echo -e "    ${BOLD}9)${NC} Resolve Rebase/Merge Conflicts"
         echo -e "    ${BOLD}q)${NC} Quit"
         echo ""
 
@@ -1098,6 +1264,7 @@ main_menu() {
             6) view_log ;;
             7) setup_linear_history ;;
             8) branch_cleanup ;;
+            9) resolve_conflicts ;;
             q|Q) echo ""; info "Goodbye!"; echo ""; exit 0 ;;
             *) error "Invalid selection. Try again." ;;
         esac
