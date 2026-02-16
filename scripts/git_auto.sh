@@ -77,17 +77,26 @@ confirm() {
     local msg="${1:-Continue?}"
     prompt "$msg [y/N]: "
     read -r response
+    response=$(echo "$response" | tr -d '\r')
     [[ "$response" =~ ^[Yy]$ ]]
 }
 
-# Check if inside a git repository
+# Cached paths (set once at startup — avoids repeated git rev-parse)
+GIT_DIR=""
+TOP_LEVEL=""
+REPO_NAME=""
+
+# Check if inside a git repository and cache paths
 check_git_repo() {
     if ! git rev-parse --is-inside-work-tree &>/dev/null; then
         error "Not inside a Git repository."
         error "Please navigate to a Git repository and try again."
         exit 1
     fi
-    info "Git repository: $(basename "$(git rev-parse --show-toplevel)")"
+    GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+    TOP_LEVEL=$(git rev-parse --show-toplevel 2>/dev/null)
+    REPO_NAME=$(basename "$TOP_LEVEL" 2>/dev/null)
+    info "Git repository: $REPO_NAME"
 }
 
 # Check remote connectivity
@@ -139,12 +148,12 @@ get_stored_base_branch() {
 
 # Check if in rebase state (conflict or mid-rebase)
 in_rebase_state() {
-    [[ -d "$(git rev-parse --git-dir)/rebase-merge" ]] || [[ -d "$(git rev-parse --git-dir)/rebase-apply" ]]
+    [[ -n "$GIT_DIR" ]] && { [[ -d "$GIT_DIR/rebase-merge" ]] || [[ -d "$GIT_DIR/rebase-apply" ]]; }
 }
 
 # Check if in merge conflict state
 in_merge_state() {
-    [[ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]]
+    [[ -n "$GIT_DIR" ]] && [[ -f "$GIT_DIR/MERGE_HEAD" ]]
 }
 
 # List conflicted files (unmerged)
@@ -191,16 +200,26 @@ _handle_rebase_conflict() {
     fi
 }
 
-# Display current repo status summary (single git call for speed)
-show_status_summary() {
-    local branch staged modified untracked
-    branch=$(current_branch)
-    read -r staged modified untracked <<< "$(git status --porcelain 2>/dev/null | awk '
+# Parse git status --porcelain into counts (staged, modified, untracked)
+# Output: "staged modified untracked" on one line
+_parse_status_counts() {
+    local porcelain
+    porcelain="${1:-$(git status --porcelain 2>/dev/null)}"
+    awk '
         /^\?\?/ { u++ }
         /^[MADRC]/ { s++ }
         /^.[MD ]|^ [MD]/ { if ($0 !~ /^\?\?/) m++ }
         END { print s+0, m+0, u+0 }
-    ')"
+    ' <<< "$porcelain"
+}
+
+
+# Display current repo status summary (reuses porcelain if provided)
+show_status_summary() {
+    local branch staged modified untracked porcelain
+    branch=$(current_branch)
+    porcelain="${1:-$(git status --porcelain 2>/dev/null)}"
+    read -r staged modified untracked <<< "$(_parse_status_counts "$porcelain")"
 
     echo ""
     echo -e "  ${BOLD}Branch:${NC}    $branch"
@@ -223,24 +242,17 @@ create_feature_branch() {
     # ── Select base branch ──────────────────────────────────────────────
     print_section "Select Base Branch"
 
-    # Build list of available base branches
+    # Build list of available base branches (one git call instead of 4+ ls-remote)
     local base_branches=()
     local display_names=()
+    local all_branches
+    all_branches=$(git branch -a 2>/dev/null | sed 's|remotes/[^/]*/||;s|^[* ]*||')
 
-    if branch_exists_local "main" || branch_exists_remote "main"; then
-        base_branches+=("main")
-        display_names+=("main")
-    fi
-    if branch_exists_local "development" || branch_exists_remote "development"; then
-        base_branches+=("development")
-        display_names+=("development")
-    fi
-
-    # Add release branches (local and remote)
+    echo "$all_branches" | grep -qE '^main$' && base_branches+=("main") && display_names+=("main")
+    echo "$all_branches" | grep -qE '^development$' && base_branches+=("development") && display_names+=("development")
     while IFS= read -r rb; do
         [[ -n "$rb" ]] && base_branches+=("$rb") && display_names+=("$rb")
-    done < <(git branch -a --list '*release/*' 2>/dev/null \
-             | sed 's|remotes/origin/||;s|^[* ]*||' | sort -u)
+    done < <(echo "$all_branches" | grep 'release/' | sort -u)
 
     if [[ ${#base_branches[@]} -eq 0 ]]; then
         error "No base branches found (main, development, release/*)."
@@ -257,6 +269,7 @@ create_feature_branch() {
     local selection
     prompt "Select base branch [1-${#base_branches[@]}]: "
     read -r selection
+    selection=$(echo "$selection" | tr -d '\r')
 
     if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#base_branches[@]} )); then
         error "Invalid selection."
@@ -277,6 +290,7 @@ create_feature_branch() {
 
     prompt "Select branch type [1-4]: "
     read -r type_selection
+    type_selection=$(echo "$type_selection" | tr -d '\r')
 
     local prefix
     case "$type_selection" in
@@ -400,16 +414,17 @@ commit_and_push() {
 
     info "Current branch: $branch"
 
+    # Single git call for status (replaces 3–4 separate calls)
+    local porcelain
+    porcelain=$(git status --porcelain 2>/dev/null)
+
     # ── Show current status ─────────────────────────────────────────────
-    show_status_summary
+    show_status_summary "$porcelain"
 
-    # Check if there's anything to commit
-    local modified_files untracked_files staged_files
-    staged_files=$(git diff --cached --name-only 2>/dev/null)
-    modified_files=$(git diff --name-only 2>/dev/null)
-    untracked_files=$(git ls-files --others --exclude-standard 2>/dev/null)
-
-    if [[ -z "$modified_files" && -z "$untracked_files" && -z "$staged_files" ]]; then
+    # Check if there's anything to commit (parse from porcelain)
+    local s m u
+    read -r s m u <<< "$(_parse_status_counts "$porcelain")"
+    if [[ "${s:-0}" -eq 0 && "${m:-0}" -eq 0 && "${u:-0}" -eq 0 ]]; then
         warn "Nothing to commit. Working tree is clean."
         return 0
     fi
@@ -418,12 +433,26 @@ commit_and_push() {
     print_section "Select Files to Stage"
     echo ""
     echo -e "    ${BOLD}1)${NC} Stage ALL changed and untracked files"
-    echo -e "    ${BOLD}2)${NC} Select SPECIFIC files interactively"
+    echo -e "    ${BOLD}2)${NC} Select SPECIFIC files (shows numbered list next)"
     echo -e "    ${BOLD}3)${NC} Stage only already-staged files (skip staging)"
     echo ""
+    dim "  For specific files: choose 2 first, then enter numbers like 1,4 at the next prompt."
+    echo ""
 
-    prompt "Selection [1-3]: "
+    prompt "Choose option [1-3]: "
     read -r stage_choice
+
+    # Normalize input (strip CRLF/spaces) so "1", "2", "3" work on Windows
+    stage_choice=$(echo "$stage_choice" | tr -d '\r' | tr -d ' ')
+
+    # If user typed file numbers (e.g. 1,4) at first prompt, treat as "select specific"
+    local prefill=""
+    if [[ ! "$stage_choice" =~ ^[123]$ ]] && [[ "$stage_choice" =~ ^[0-9]+([,\-][0-9]+)*$ ]]; then
+        prefill="$stage_choice"
+        stage_choice="2"
+        dim "  (Interpreted as: select specific files: $prefill)"
+        echo ""
+    fi
 
     case "$stage_choice" in
         1)
@@ -431,10 +460,10 @@ commit_and_push() {
             info "All files staged."
             ;;
         2)
-            _interactive_file_staging
+            _interactive_file_staging "$prefill" "$porcelain"
             ;;
         3)
-            if [[ -z "$staged_files" ]]; then
+            if [[ "${s:-0}" -eq 0 ]]; then
                 warn "No files are currently staged."
                 if confirm "Stage all files instead?"; then
                     git add -A
@@ -495,6 +524,7 @@ commit_and_push() {
 
     prompt "Commit type [1-7]: "
     read -r commit_type_choice
+    commit_type_choice=$(echo "$commit_type_choice" | tr -d '\r')
 
     local commit_prefix
     case "$commit_type_choice" in
@@ -536,6 +566,7 @@ commit_and_push() {
     # Optional body
     prompt "Add detailed body? [y/N]: "
     read -r add_body
+    add_body=$(echo "$add_body" | tr -d '\r')
     local commit_body=""
     if [[ "$add_body" =~ ^[Yy]$ ]]; then
         echo -e "    ${DIM}Enter commit body (press Ctrl+D or empty line to finish):${NC}"
@@ -623,31 +654,48 @@ commit_and_push() {
 }
 
 # Interactive file staging helper
+# Args: 1) pre-filled selection (e.g. "1,4"), 2) optional porcelain (avoids 3 git calls)
 _interactive_file_staging() {
-    # Combine all changed/untracked files
+    local prefill="${1:-}"
+    local porcelain="${2:-}"
     local all_files=()
     local file_statuses=()
 
-    while IFS= read -r file; do
-        [[ -n "$file" ]] && all_files+=("$file") && file_statuses+=("modified")
-    done < <(git diff --name-only 2>/dev/null)
-
-    while IFS= read -r file; do
-        [[ -n "$file" ]] && all_files+=("$file") && file_statuses+=("untracked")
-    done < <(git ls-files --others --exclude-standard 2>/dev/null)
-
-    # Also show already-staged files
-    while IFS= read -r file; do
-        # Avoid duplicates
-        local found=false
-        for f in "${all_files[@]}"; do
-            [[ "$f" == "$file" ]] && found=true && break
-        done
-        if ! $found && [[ -n "$file" ]]; then
-            all_files+=("$file")
-            file_statuses+=("staged")
-        fi
-    done < <(git diff --cached --name-only 2>/dev/null)
+    if [[ -n "$porcelain" ]]; then
+        # Parse from porcelain (single git call upstream) — order: modified, untracked, staged
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            local path="${line:3}" xy="${line:0:2}"
+            # For renames "R  old -> new": store both paths; we use path for display, staging adds new
+            [[ "$path" == *" -> "* ]] && path="${path#* -> }"
+            if [[ "$xy" == "??" ]]; then
+                all_files+=("$path"); file_statuses+=("untracked")
+            elif [[ "${xy:1:1}" == "M" ]] || [[ "${xy:1:1}" == "D" ]]; then
+                all_files+=("$path"); file_statuses+=("modified")
+            elif [[ "${xy:0:1}" =~ [MADRC] ]]; then
+                all_files+=("$path"); file_statuses+=("staged")
+            else
+                all_files+=("$path"); file_statuses+=("modified")
+            fi
+        done < <(echo "$porcelain")
+    else
+        while IFS= read -r file; do
+            [[ -n "$file" ]] && all_files+=("$file") && file_statuses+=("modified")
+        done < <(git diff --name-only 2>/dev/null)
+        while IFS= read -r file; do
+            [[ -n "$file" ]] && all_files+=("$file") && file_statuses+=("untracked")
+        done < <(git ls-files --others --exclude-standard 2>/dev/null)
+        while IFS= read -r file; do
+            local found=false
+            for f in "${all_files[@]}"; do
+                [[ "$f" == "$file" ]] && found=true && break
+            done
+            if ! $found && [[ -n "$file" ]]; then
+                all_files+=("$file")
+                file_statuses+=("staged")
+            fi
+        done < <(git diff --cached --name-only 2>/dev/null)
+    fi
 
     if [[ ${#all_files[@]} -eq 0 ]]; then
         warn "No files to stage."
@@ -669,20 +717,29 @@ _interactive_file_staging() {
     dim "Enter file numbers separated by spaces or commas."
     dim "Ranges supported: 1-5  |  All: 'a'  |  Example: 1,3,5-8"
     echo ""
-    prompt "Files to stage: "
-    read -r file_selection
+    local file_selection
+    if [[ -n "$prefill" ]]; then
+        file_selection="$prefill"
+        info "Using selection: $file_selection"
+    else
+        prompt "Files to stage: "
+        read -r file_selection
+    fi
 
-    if [[ "$file_selection" =~ ^[Aa]$ ]]; then
+    if [[ "$(echo "$file_selection" | tr -d '\r')" =~ ^[Aa]$ ]]; then
         git add -A
         info "All files staged."
         return
     fi
 
-    # Parse selection (supports: 1,3,5-8)
+    # Parse selection (supports: 1,3,5-8 or 1 3 5-8 — spaces or commas)
+    # Strip \r (Windows CRLF) so "1,4" from terminal is parsed correctly
     local selected_indices=()
-    IFS=',' read -ra parts <<< "$file_selection"
+    local normalized
+    normalized=$(echo "$file_selection" | tr -d '\r' | tr ',' ' ')
+    read -ra parts <<< "$normalized"
     for part in "${parts[@]}"; do
-        part=$(echo "$part" | tr -d ' ')
+        part=$(echo "$part" | tr -d ' \r')
         if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
             for (( i=BASH_REMATCH[1]; i<=BASH_REMATCH[2]; i++ )); do
                 selected_indices+=("$i")
@@ -766,6 +823,7 @@ sync_feature_branch() {
 
         prompt "Select base branch [1-${#base_branches[@]}]: "
         read -r selection
+        selection=$(echo "$selection" | tr -d '\r')
 
         if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#base_branches[@]} )); then
             error "Invalid selection."
@@ -836,6 +894,11 @@ merge_feature_to_base() {
         [[ -n "$rb" ]] && base_branches+=("$rb")
     done < <(git branch --list 'release/*' 2>/dev/null | sed 's|^[* ]*||')
 
+    if [[ ${#base_branches[@]} -eq 0 ]]; then
+        error "No target branches found (development, main, release/*)."
+        return 1
+    fi
+
     echo ""
     for i in "${!base_branches[@]}"; do
         echo -e "    ${BOLD}$((i+1)))${NC} ${base_branches[$i]}"
@@ -844,6 +907,7 @@ merge_feature_to_base() {
 
     prompt "Select target branch [1-${#base_branches[@]}]: "
     read -r selection
+    selection=$(echo "$selection" | tr -d '\r')
 
     if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#base_branches[@]} )); then
         error "Invalid selection."
@@ -921,6 +985,7 @@ stash_management() {
 
     prompt "Selection [1-6]: "
     read -r choice
+    choice=$(echo "$choice" | tr -d '\r')
 
     case "$choice" in
         1)
@@ -982,6 +1047,7 @@ view_log() {
 
     prompt "Selection [1-3]: "
     read -r choice
+    choice=$(echo "$choice" | tr -d '\r')
 
     case "$choice" in
         1)
@@ -1072,6 +1138,7 @@ branch_cleanup() {
 
     prompt "Selection [1-3]: "
     read -r choice
+    choice=$(echo "$choice" | tr -d '\r')
 
     case "$choice" in
         1|2)
@@ -1103,8 +1170,11 @@ branch_cleanup() {
             echo ""
 
             if confirm "Delete these branches?"; then
+                local current
+                current=$(current_branch)
                 while IFS= read -r b; do
                     [[ -z "$b" ]] && continue
+                    [[ "$b" == "$current" ]] && warn "Skipping current branch '$b'" && continue
                     git branch -d "$b" 2>/dev/null && info "Deleted local: $b"
                     if [[ "$choice" == "2" ]] && branch_exists_remote "$b"; then
                         git push "$REMOTE" --delete "$b" 2>/dev/null && info "Deleted remote: $b"
@@ -1150,6 +1220,7 @@ resolve_conflicts() {
         echo ""
         prompt "Selection [1-4]: "
         read -r choice
+        choice=$(echo "$choice" | tr -d '\r')
         case "$choice" in
             1)
                 git add -A
@@ -1175,9 +1246,11 @@ resolve_conflicts() {
                     [[ -n "$f" ]] && files+=("$f") && echo -e "    ${BOLD}$i)${NC} $f" && ((i++))
                 done <<< "$conflicted"
                 echo ""
-                prompt "Enter file number(s) to stage (e.g. 1 3): "
+                prompt "Enter file number(s) to stage (e.g. 1,3 or 1 3): "
                 read -r nums
+                nums=$(echo "$nums" | tr -d '\r' | tr ',' ' ')
                 for n in $nums; do
+                    n=$(echo "$n" | tr -d ' \r')
                     if [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= ${#files[@]} )); then
                         git add "${files[$((n-1))]}"
                         info "Staged: ${files[$((n-1))]}"
@@ -1186,6 +1259,7 @@ resolve_conflicts() {
                 if in_rebase_state; then
                     prompt "Continue rebase now? [y/N]: "
                     read -r cont
+                    cont=$(echo "$cont" | tr -d '\r')
                     [[ "$cont" =~ ^[Yy]$ ]] && git rebase --continue 2>/dev/null && info "Rebase continued."
                 fi
                 ;;
@@ -1228,7 +1302,7 @@ main_menu() {
 
         local branch
         branch=$(current_branch)
-        echo -e "  ${BOLD}Repository:${NC} $(basename "$(git rev-parse --show-toplevel)" 2>/dev/null)"
+        echo -e "  ${BOLD}Repository:${NC} ${REPO_NAME:-$(basename "$(git rev-parse --show-toplevel 2>/dev/null)")}"
         echo -e "  ${BOLD}Branch:${NC}     $branch"
         if is_protected_branch "$branch"; then
             echo -e "  ${BOLD}Type:${NC}       ${RED}PROTECTED${NC}"
@@ -1254,6 +1328,7 @@ main_menu() {
 
         prompt "Selection: "
         read -r choice
+        choice=$(echo "$choice" | tr -d '\r')
 
         case "$choice" in
             1) create_feature_branch ;;
