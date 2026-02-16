@@ -76,7 +76,7 @@ dim()     { echo -e "${DIM}    $1${NC}"; }
 confirm() {
     local msg="${1:-Continue?}"
     prompt "$msg [y/N]: "
-    read -r response
+    read -r response || response="n"
     response=$(echo "$response" | tr -d '\r')
     [[ "$response" =~ ^[Yy]$ ]]
 }
@@ -440,7 +440,7 @@ commit_and_push() {
     echo ""
 
     prompt "Choose option [1-3]: "
-    read -r stage_choice
+    read -r stage_choice || true
 
     # Normalize input (strip CRLF/spaces) so "1", "2", "3" work on Windows
     stage_choice=$(echo "$stage_choice" | tr -d '\r' | tr -d ' ')
@@ -523,8 +523,8 @@ commit_and_push() {
     echo ""
 
     prompt "Commit type [1-7]: "
-    read -r commit_type_choice
-    commit_type_choice=$(echo "$commit_type_choice" | tr -d '\r')
+    read -r commit_type_choice || true
+    commit_type_choice=$(echo "$commit_type_choice" | tr -d '\r\t ')
 
     local commit_prefix
     case "$commit_type_choice" in
@@ -545,19 +545,21 @@ commit_and_push() {
     esac
 
     prompt "Scope (optional, e.g. JIRA-1234 — press Enter to skip): "
-    read -r commit_scope
+    read -r commit_scope || true
+    commit_scope=$(echo "${commit_scope:-}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
     prompt "Short description: "
-    read -r commit_desc
+    read -r commit_desc || true
+    commit_desc=$(echo "$commit_desc" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
-    if [[ -z "$commit_desc" ]]; then
+    if [[ -z "${commit_desc:-}" ]]; then
         error "Commit description cannot be empty."
         return 1
     fi
 
     # Build commit message
     local commit_msg
-    if [[ -n "$commit_scope" ]]; then
+    if [[ -n "${commit_scope:-}" ]]; then
         commit_msg="${commit_prefix}(${commit_scope}): ${commit_desc}"
     else
         commit_msg="${commit_prefix}: ${commit_desc}"
@@ -565,14 +567,14 @@ commit_and_push() {
 
     # Optional body
     prompt "Add detailed body? [y/N]: "
-    read -r add_body
+    read -r add_body || true
     add_body=$(echo "$add_body" | tr -d '\r')
     local commit_body=""
     if [[ "$add_body" =~ ^[Yy]$ ]]; then
-        echo -e "    ${DIM}Enter commit body (press Ctrl+D or empty line to finish):${NC}"
+        echo -e "    ${DIM}Enter commit body (empty line to finish):${NC}"
         local body_lines=()
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && break
+        while IFS= read -r line || true; do
+            [[ -z "${line:-}" ]] && break
             body_lines+=("$line")
         done
         commit_body=$(printf '%s\n' "${body_lines[@]}")
