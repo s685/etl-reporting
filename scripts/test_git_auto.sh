@@ -1,9 +1,9 @@
-﻿#!/usr/bin/env bash
-#â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+#!/usr/bin/env bash
+#------------------------------------------------------------------------------
 #  Test harness for git_auto.sh
 #  Usage: ./test_git_auto.sh [workflow_num] [iterations]
 #  Example: ./test_git_auto.sh 2 2   # Run Option 2 (Stage, Commit & Push) twice
-#â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+#------------------------------------------------------------------------------
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +15,7 @@ run_option2() {
     local iter="$1"
     # Option 2 flow: 2, 1 (stage all), 1 (feat), (enter scope), desc, n (no body), y (commit), y (push or n for protected)
     # On main (protected): 2, 1, 1, , "test run $iter", n, y, y, y (SURE push)
-    # + Enter to return to menu
+    # + Enter to return to menu, then q to quit
     {
         echo "2"
         echo "1"
@@ -27,15 +27,16 @@ run_option2() {
         echo "y"
         echo "y"
         echo ""
+        echo "q"
     } | bash "$GIT_AUTO" 2>&1
 }
 
 run_option6() {
-    local iter="$1"
     {
         echo "6"
         echo "1"
         echo ""
+        echo "q"
     } | bash "$GIT_AUTO" 2>&1
 }
 
@@ -44,6 +45,7 @@ run_option7() {
         echo "7"
         echo "n"
         echo ""
+        echo "q"
     } | bash "$GIT_AUTO" 2>&1
 }
 
@@ -52,6 +54,7 @@ run_option8() {
         echo "8"
         echo "3"
         echo ""
+        echo "q"
     } | bash "$GIT_AUTO" 2>&1
 }
 
@@ -60,6 +63,7 @@ run_option5_list() {
         echo "5"
         echo "2"
         echo ""
+        echo "q"
     } | bash "$GIT_AUTO" 2>&1
 }
 
