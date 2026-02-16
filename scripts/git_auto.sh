@@ -758,7 +758,7 @@ _interactive_file_staging() {
         if (( file_idx >= 0 && file_idx < ${#all_files[@]} )); then
             git add "${all_files[$file_idx]}"
             info "Staged: ${all_files[$file_idx]}"
-            ((staged_count++))
+            staged_count=$((staged_count + 1))
         else
             warn "Invalid index: $idx (skipped)"
         fi
@@ -1245,7 +1245,7 @@ resolve_conflicts() {
                 local i=1
                 local files=()
                 while IFS= read -r f; do
-                    [[ -n "$f" ]] && files+=("$f") && echo -e "    ${BOLD}$i)${NC} $f" && ((i++))
+                    [[ -n "$f" ]] && files+=("$f") && echo -e "    ${BOLD}$i)${NC} $f" && i=$((i + 1))
                 done <<< "$conflicted"
                 echo ""
                 prompt "Enter file number(s) to stage (e.g. 1,3 or 1 3): "
