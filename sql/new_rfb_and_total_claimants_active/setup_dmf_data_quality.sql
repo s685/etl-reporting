@@ -27,10 +27,16 @@
 -- =====================================================================
 -- CONFIGURATION VARIABLES
 -- =====================================================================
-SET target_table = '{{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.new_rfb_and_total_claimants_active_detail';
+SET target_database = '{{TARGET_DATABASE}}';
+SET target_schema = '{{TARGET_SCHEMA}}';
+SET target_table = $target_schema || '.new_rfb_and_total_claimants_active_detail';
+SET source_view = $target_schema || '.source_rfb_count_monthly';
 SET source_database = '{{SOURCE_DATABASE}}';
-SET config_view = '{{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.report_period_all_frequencies';
-SET source_view = '{{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.source_rfb_count_monthly';
+SET config_view = $target_database || '.' || $target_schema || '.report_period_all_frequencies';
+
+-- Use two-part names (schema.object) to avoid "unexpected database name" in ADD DMF TABLE clause.
+-- USE DATABASE is required before ALTER VIEW / CREATE VIEW / ADD DMF when using two-part names.
+USE DATABASE IDENTIFIER($target_database);
 
 -- Object type: VIEW (change to TABLE if target is a table)
 -- Snowflake DMFs accept only 1 or 2 TABLE arguments. We use: (1) target, (2) source view.
@@ -148,6 +154,49 @@ EXPECT VALUE = 0
 WITH COMMENT 'DQ-024: Source count must match target count (eob_ranking + care_mgmt_ranking). Returns absolute difference: 0 = match, >0 = mismatch.';
 
 -- =====================================================================
+-- STEP 4b: STATISTICS DMFs (MIN/MAX) ON new_rfb_and_total_claimants_active_detail
+-- =====================================================================
+-- Numeric columns: DAYS (working days), NumDaysResolvedWithinTwoWeeks (0/1).
+-- Aligns with test_data_quality: DQ-008 (no negative DAYS), DQ-009 (DAYS <= 730),
+-- DQ-012 (flag 0 or 1 only).
+-- Report creates a TABLE (save_as_table). Use ALTER TABLE if target is a table;
+-- use ALTER VIEW if target is a view. Change IDENTIFIER target accordingly.
+
+ALTER VIEW IDENTIFIER($target_table)
+ADD DATA METRIC FUNCTION SNOWFLAKE.CORE.MIN ON (DAYS),
+ADD DATA METRIC FUNCTION SNOWFLAKE.CORE.MAX ON (DAYS),
+ADD DATA METRIC FUNCTION SNOWFLAKE.CORE.MIN ON (NumDaysResolvedWithinTwoWeeks),
+ADD DATA METRIC FUNCTION SNOWFLAKE.CORE.MAX ON (NumDaysResolvedWithinTwoWeeks);
+
+-- =====================================================================
+-- STEP 4c: STATISTICS EXPECTATIONS
+-- =====================================================================
+
+CREATE OR REPLACE EXPECTATION days_min_non_negative
+ON TABLE IDENTIFIER($target_table)
+FOR DATA METRIC FUNCTION SNOWFLAKE.CORE.MIN(DAYS)
+EXPECT VALUE >= 0
+WITH COMMENT 'DQ-008: No negative turnaround days.';
+
+CREATE OR REPLACE EXPECTATION days_max_bounded
+ON TABLE IDENTIFIER($target_table)
+FOR DATA METRIC FUNCTION SNOWFLAKE.CORE.MAX(DAYS)
+EXPECT VALUE <= 730
+WITH COMMENT 'DQ-009: No unrealistic turnaround times (> 730 days).';
+
+CREATE OR REPLACE EXPECTATION two_week_flag_min
+ON TABLE IDENTIFIER($target_table)
+FOR DATA METRIC FUNCTION SNOWFLAKE.CORE.MIN(NumDaysResolvedWithinTwoWeeks)
+EXPECT VALUE >= 0
+WITH COMMENT 'NumDaysResolvedWithinTwoWeeks must be 0 or 1 only (min >= 0).';
+
+CREATE OR REPLACE EXPECTATION two_week_flag_max
+ON TABLE IDENTIFIER($target_table)
+FOR DATA METRIC FUNCTION SNOWFLAKE.CORE.MAX(NumDaysResolvedWithinTwoWeeks)
+EXPECT VALUE <= 1
+WITH COMMENT 'DQ-012: NumDaysResolvedWithinTwoWeeks must be 0 or 1 only (max <= 1).';
+
+-- =====================================================================
 -- STEP 5: VERIFY DMF SETUP
 -- =====================================================================
 -- Check that DMF was added successfully
@@ -163,7 +212,7 @@ FROM TABLE(SNOWFLAKE.INFORMATION_SCHEMA.DATA_METRIC_FUNCTION_REFERENCES(
     REF_ENTITY_NAME => $target_table,
     REF_ENTITY_DOMAIN => 'VIEW'
 ))
-WHERE metric_name = 'SOURCE_TARGET_COUNT_DIFFERENCE';
+ORDER BY metric_name;
 
 -- =====================================================================
 -- STEP 6: VIEW RESULTS (AFTER DMF EXECUTION)
@@ -178,16 +227,16 @@ SELECT
     expectation_status,
     timestamp,
     CASE 
-        WHEN expectation_status = 'PASSED' THEN '✓ Counts match'
-        WHEN expectation_status = 'FAILED' THEN '✗ Count mismatch: ' || metric_value || ' records differ'
+        WHEN expectation_name = 'source_target_count_match' AND expectation_status = 'PASSED' THEN '✓ Counts match'
+        WHEN expectation_name = 'source_target_count_match' AND expectation_status = 'FAILED' THEN '✗ Count mismatch: ' || metric_value || ' records differ'
+        WHEN expectation_name LIKE 'days_%' OR expectation_name LIKE 'two_week_%' THEN expectation_name || ': ' || expectation_status || ' (value=' || COALESCE(metric_value::VARCHAR, 'null') || ')'
         ELSE 'Status: ' || expectation_status
     END AS status_message
 FROM TABLE(SNOWFLAKE.INFORMATION_SCHEMA.DATA_METRIC_FUNCTION_RESULTS(
     $target_table
 ))
-WHERE expectation_name = 'source_target_count_match'
-ORDER BY timestamp DESC
-LIMIT 10;
+ORDER BY timestamp DESC, expectation_name
+LIMIT 20;
 
 -- =====================================================================
 -- STEP 7: MANUAL EXECUTION (FOR TESTING)
@@ -195,11 +244,19 @@ LIMIT 10;
 -- Execute DMF immediately for testing (not billed, per Snowflake docs)
 -- Replace with actual table/view name and column names
 
+-- USE DATABASE {{TARGET_DATABASE}};  -- if not already in context
 /*
+-- Custom DMF (source vs target count):
 SELECT source_target_count_difference(
-    TABLE({{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.new_rfb_and_total_claimants_active_detail("Policy Number")),
-    TABLE({{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.source_rfb_count_monthly(rfb_id))
+    TABLE({{TARGET_SCHEMA}}.new_rfb_and_total_claimants_active_detail("Policy Number")),
+    TABLE({{TARGET_SCHEMA}}.source_rfb_count_monthly(rfb_id))
 ) AS count_difference;
+
+-- Statistics (MIN/MAX) — run directly for testing:
+SELECT SNOWFLAKE.CORE.MIN(SELECT DAYS FROM {{TARGET_SCHEMA}}.new_rfb_and_total_claimants_active_detail) AS min_days;
+SELECT SNOWFLAKE.CORE.MAX(SELECT DAYS FROM {{TARGET_SCHEMA}}.new_rfb_and_total_claimants_active_detail) AS max_days;
+SELECT SNOWFLAKE.CORE.MIN(SELECT NumDaysResolvedWithinTwoWeeks FROM {{TARGET_SCHEMA}}.new_rfb_and_total_claimants_active_detail) AS min_flag;
+SELECT SNOWFLAKE.CORE.MAX(SELECT NumDaysResolvedWithinTwoWeeks FROM {{TARGET_SCHEMA}}.new_rfb_and_total_claimants_active_detail) AS max_flag;
 */
 
 -- =====================================================================
@@ -225,6 +282,18 @@ SELECT source_target_count_difference(
 -- Drop expectation
 -- DROP EXPECTATION source_target_count_match ON TABLE IDENTIFIER($target_table);
 
+-- Drop statistics expectations (if needed)
+-- DROP EXPECTATION days_min_non_negative ON TABLE IDENTIFIER($target_table);
+-- DROP EXPECTATION days_max_bounded ON TABLE IDENTIFIER($target_table);
+-- DROP EXPECTATION two_week_flag_min ON TABLE IDENTIFIER($target_table);
+-- DROP EXPECTATION two_week_flag_max ON TABLE IDENTIFIER($target_table);
+
+-- Drop statistics DMFs (ON clause must match ADD exactly)
+-- ALTER VIEW IDENTIFIER($target_table) DROP DATA METRIC FUNCTION SNOWFLAKE.CORE.MIN ON (DAYS);
+-- ALTER VIEW IDENTIFIER($target_table) DROP DATA METRIC FUNCTION SNOWFLAKE.CORE.MAX ON (DAYS);
+-- ALTER VIEW IDENTIFIER($target_table) DROP DATA METRIC FUNCTION SNOWFLAKE.CORE.MIN ON (NumDaysResolvedWithinTwoWeeks);
+-- ALTER VIEW IDENTIFIER($target_table) DROP DATA METRIC FUNCTION SNOWFLAKE.CORE.MAX ON (NumDaysResolvedWithinTwoWeeks);
+
 -- =====================================================================
 -- DESIGN NOTES & BEST PRACTICES
 -- =====================================================================
@@ -242,4 +311,9 @@ SELECT source_target_count_difference(
 --
 -- 4. SNOWFLAKE-SPECIFIC:
 --    - QUALIFY in source view; follows DMF documentation patterns.
+--
+-- 5. STATISTICS (STEP 4b–4c):
+--    - MIN/MAX on DAYS: no negative days (>= 0), no unrealistic turnaround (<= 730).
+--    - MIN/MAX on NumDaysResolvedWithinTwoWeeks: flag 0 or 1 only.
+--    - Maps to DQ-008, DQ-009, DQ-012 in test_data_quality.sql.
 -- =====================================================================

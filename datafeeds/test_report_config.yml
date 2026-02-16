@@ -1,0 +1,34 @@
+# Minimal test config for datafeed verification
+carrier_name: TEST_CARRIER
+report_name: Test Report
+pre_sql_query: "SELECT 1"
+tables:
+  - table: "TEST_DB.TEST_SCHEMA.TEST_TABLE"
+    sheetname: "Sheet1"
+sheet_header_font:
+  name: Calibri
+  size: 11
+  bold: false
+  color: "000000"
+  alignment: left
+  wrap_text: false
+  fill_color: "FFFFFF"
+  fill_type: solid
+table_header_font:
+  name: Calibri
+  size: 11
+  bold: true
+  color: "000000"
+  alignment: left
+  wrap_text: false
+  fill_color: "EEEEEE"
+  fill_type: solid
+table_data_font:
+  name: Calibri
+  size: 10
+  bold: false
+  color: "000000"
+  alignment: left
+  wrap_text: false
+  fill_color: "FFFFFF"
+  fill_type: solid

@@ -547,6 +547,206 @@ your_report/
 
 ---
 
+## 14. Snowflake-Native Notifications for Failed DMF Checks
+
+Snowflake can send notifications when DMF expectations **fail** (or when anomaly detection finds an issue). You can use either:
+
+- **Database-level notifications (recommended)** – Enable notifications on the database; Snowflake sends them automatically when an expectation is violated. No Alert or view required.
+- **Alert-based notifications** – Use a view of violations plus an Alert that runs on a schedule and calls a notification (see 14.1–14.4).
+
+**Primary doc:** [Sending notifications for data quality issues](https://docs.snowflake.com/en/user-guide/data-quality-notifications).
+
+---
+
+### 14.0 Database-level notifications (automatic, no Alert)
+
+Snowflake can send a notification **whenever** an expectation is violated (or an anomaly is detected) for any DMF on any table/view in a database. You enable this at the **database** level; no Alert or violation view is needed.
+
+**Workflow:**
+
+1. Create a notification integration (email or webhook) if you do not have one.
+2. Grant the database owner: `MANAGE DATA QUALITY ON ACCOUNT` and `USAGE ON INTEGRATION <integration_name>`.
+3. Run `ALTER DATABASE <db_name> SET DATA_QUALITY_MONITORING_SETTINGS = ...` to turn on notifications and attach the integration(s).
+
+**Example (email integration `my_email_int`, database `dev_snowflake_warehouse`):**
+
+```sql
+-- 1. Grant privileges to the role that owns the database (replace your_db_owner with the actual role)
+GRANT MANAGE DATA QUALITY ON ACCOUNT TO ROLE your_db_owner;
+GRANT USAGE ON INTEGRATION my_email_int TO ROLE your_db_owner;
+
+-- 2. Enable notifications for the database
+ALTER DATABASE dev_snowflake_warehouse SET DATA_QUALITY_MONITORING_SETTINGS =
+$$
+notification:
+  enabled: TRUE
+  integrations:
+    - my_email_int
+  metadata_included: TRUE
+$$;
+```
+
+- **metadata_included: TRUE** – Notifications include the table/view (and DMF) that had the issue.
+- You can list multiple integrations (e.g. email + webhook) under `integrations:`.
+
+**Turn off notifications for one DMF association:**
+
+```sql
+ALTER VIEW dev_snowflake_warehouse.your_schema.your_view
+  MODIFY DATA METRIC FUNCTION SNOWFLAKE.CORE.NULL_COUNT ON (your_column)
+    SET DATA_QUALITY_NOTIFICATION = FALSE;
+```
+
+**Check whether notifications are on:** Query `DATA_METRIC_FUNCTION_REFERENCES`; the column `data_quality_notification_status` indicates if notifications are enabled for each association.
+
+**Doc:** [Sending notifications for data quality issues](https://docs.snowflake.com/en/user-guide/data-quality-notifications).
+
+---
+
+### 14.1 Detecting Failed Expectations (for Alert-based approach)
+
+Snowflake provides two ways to see when an expectation was violated:
+
+**Option A – `DATA_QUALITY_MONITORING_EXPECTATION_STATUS` (recommended for alerts)**
+
+Returns one row per DMF run that had an expectation. Use `expectation_violated = TRUE` for failures. Requires role with `SNOWFLAKE.DATA_QUALITY_MONITORING_VIEWER` or `DATA_QUALITY_MONITORING_ADMIN`.
+
+```sql
+-- Violations for a single table/view (fully qualified name; use 'TABLE' or 'VIEW')
+SELECT 
+    ref_entity_name,
+    metric_name,
+    expectation_name,
+    expectation_violated,
+    metric_value,
+    evaluation_time
+FROM TABLE(SNOWFLAKE.INFORMATION_SCHEMA.DATA_QUALITY_MONITORING_EXPECTATION_STATUS(
+    REF_ENTITY_NAME   => 'your_database.your_schema.your_report_output',
+    REF_ENTITY_DOMAIN => 'TABLE'
+))
+WHERE expectation_violated = TRUE
+  AND evaluation_time >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+ORDER BY evaluation_time DESC;
+```
+
+**Option B – `DATA_METRIC_FUNCTION_RESULTS`**
+
+Returns DMF results and expectation status; filter by `expectation_status = 'FAILED'`.
+
+```sql
+SELECT ref_entity_name, metric_name, expectation_name, expectation_status, metric_value, timestamp
+FROM TABLE(SNOWFLAKE.INFORMATION_SCHEMA.DATA_METRIC_FUNCTION_RESULTS(
+    REF_ENTITY_NAME => 'your_schema.your_report_output'
+))
+WHERE expectation_status = 'FAILED'
+  AND timestamp >= DATEADD('hour', -24, CURRENT_TIMESTAMP());
+```
+
+Use either in a **view** that returns rows only when there are violations; the Alert condition will be `IF (EXISTS (SELECT 1 FROM that_view))`.
+
+---
+
+### 14.2 Create a View That Returns Rows Only When There Are Violations
+
+The Alert’s condition must be a query that returns rows when you want to notify. Create a view that selects violations (last 24 hours or your chosen window):
+
+```sql
+-- Using DATA_QUALITY_MONITORING_EXPECTATION_STATUS (fully qualified ref entity)
+CREATE OR REPLACE VIEW your_schema.dmf_violations AS
+SELECT ref_entity_name, metric_name, expectation_name, metric_value, evaluation_time
+FROM TABLE(SNOWFLAKE.INFORMATION_SCHEMA.DATA_QUALITY_MONITORING_EXPECTATION_STATUS(
+    REF_ENTITY_NAME   => 'your_database.your_schema.your_report_output',
+    REF_ENTITY_DOMAIN => 'TABLE'
+))
+WHERE expectation_violated = TRUE
+  AND evaluation_time >= DATEADD('hour', -24, CURRENT_TIMESTAMP());
+```
+
+If you prefer `DATA_METRIC_FUNCTION_RESULTS`, use the same pattern with `expectation_status = 'FAILED'` and `timestamp`.
+
+---
+
+### 14.3 Notification Integration (Webhook for Teams, Slack, PagerDuty)
+
+Create a **notification integration** (one-time, typically by ACCOUNTADMIN) so Alerts can send to a webhook.
+
+**Webhook (Teams, Slack, PagerDuty):**
+
+- **Slack:** `https://hooks.slack.com/services/...`
+- **Microsoft Teams:** Incoming Webhook URL from the channel connector.
+- **PagerDuty:** `https://events.pagerduty.com/v2/enqueue`
+
+```sql
+CREATE OR REPLACE NOTIFICATION INTEGRATION dmf_alert_webhook
+  TYPE = WEBHOOK
+  ENABLED = TRUE
+  WEBHOOK_URL = 'https://your-org.webhook.office.com/webhookb2/...';   -- Teams example; use your URL
+```
+
+If the URL contains a secret, use a **secret** and reference it (see [CREATE NOTIFICATION INTEGRATION – webhooks](https://docs.snowflake.com/en/sql-reference/sql/create-notification-integration-webhooks) and [Sending webhook notifications](https://docs.snowflake.com/en/user-guide/notifications/webhook-notifications)).
+
+**Email:** Use an existing **email integration** (e.g. created in Admin > Notifications). No extra CREATE for the Alert; use `SYSTEM$SEND_EMAIL` in the action.
+
+---
+
+### 14.4 Create an Alert That Sends a Notification When Violations Exist
+
+When the condition query returns at least one row, the Alert runs the action once (e.g. send one email or one webhook call).
+
+**Email action:**
+
+```sql
+CREATE OR REPLACE ALERT your_schema.dmf_failure_alert
+  WAREHOUSE = your_warehouse
+  SCHEDULE = '60 MINUTE'
+  IF (EXISTS (SELECT 1 FROM your_schema.dmf_violations))
+  THEN
+    CALL SYSTEM$SEND_EMAIL(
+      'your_email_integration',
+      'team@example.com',
+      'DMF data quality failure',
+      'One or more DMF expectations were violated. Query dmf_violations view for details.'
+    );
+```
+
+**Webhook action (Teams/Slack):**
+
+Use `SYSTEM$SEND_SNOWFLAKE_NOTIFICATION` with the webhook integration and a message helper (`TEXT_PLAIN`, `TEXT_HTML`, or `APPLICATION_JSON`). See [SYSTEM$SEND_SNOWFLAKE_NOTIFICATION](https://docs.snowflake.com/en/sql-reference/stored-procedures/system_send_snowflake_notification) and [Sending webhook notifications](https://docs.snowflake.com/en/user-guide/notifications/webhook-notifications).
+
+```sql
+CREATE OR REPLACE ALERT your_schema.dmf_failure_alert
+  WAREHOUSE = your_warehouse
+  SCHEDULE = '60 MINUTE'
+  IF (EXISTS (SELECT 1 FROM your_schema.dmf_violations))
+  THEN
+    CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
+      INTEGRATION('dmf_alert_webhook'),
+      TEXT_PLAIN('DMF data quality failure: one or more expectations violated. Check dmf_violations view.')
+    );
+```
+
+**Activate the Alert:** New Alerts are created in **SUSPENDED** state. Resume to start checking and notifying:
+
+```sql
+ALTER ALERT your_schema.dmf_failure_alert RESUME;
+```
+
+---
+
+### 14.5 Reference Links (Snowflake Documentation)
+
+- [Sending notifications for data quality issues](https://docs.snowflake.com/en/user-guide/data-quality-notifications) (database-level notifications; recommended)
+- [Introduction to data quality and DMFs](https://docs.snowflake.com/en/user-guide/data-quality-intro)
+- [Using expectations to implement data quality checks](https://docs.snowflake.com/en/user-guide/data-quality-expectations)
+- [Monitoring data quality checks in Snowsight](https://docs.snowflake.com/en/user-guide/data-quality-ui-monitor)
+- [DATA_QUALITY_MONITORING_EXPECTATION_STATUS](https://docs.snowflake.com/en/sql-reference/functions/data_quality_monitoring_expectation_status)
+- [Alerts](https://docs.snowflake.com/en/user-guide/alerts)
+- [Sending webhook notifications](https://docs.snowflake.com/en/user-guide/notifications/webhook-notifications)
+- [CREATE NOTIFICATION INTEGRATION (webhooks)](https://docs.snowflake.com/en/sql-reference/sql/create-notification-integration-webhooks)
+- [SYSTEM$SEND_SNOWFLAKE_NOTIFICATION](https://docs.snowflake.com/en/sql-reference/stored-procedures/system_send_snowflake_notification)
+
+---
+
 ## 13. Quick Start Checklist
 
 - [ ] Verify Snowflake Enterprise Edition

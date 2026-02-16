@@ -268,8 +268,8 @@ create_feature_branch() {
 
     local selection
     prompt "Select base branch [1-${#base_branches[@]}]: "
-    read -r selection
-    selection=$(echo "$selection" | tr -d '\r')
+    read -r selection || true
+    selection=$(echo "${selection:-}" | tr -d '\r')
 
     if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#base_branches[@]} )); then
         error "Invalid selection."
@@ -289,8 +289,8 @@ create_feature_branch() {
     echo ""
 
     prompt "Select branch type [1-4]: "
-    read -r type_selection
-    type_selection=$(echo "$type_selection" | tr -d '\r')
+    read -r type_selection || true
+    type_selection=$(echo "${type_selection:-}" | tr -d '\r')
 
     local prefix
     case "$type_selection" in
@@ -299,7 +299,7 @@ create_feature_branch() {
         3) prefix="$HOTFIX_PREFIX" ;;
         4)
             prompt "Enter custom prefix (e.g. 'refactor/'): "
-            read -r prefix
+            read -r prefix || true
             # Ensure trailing slash
             [[ "$prefix" != */ ]] && prefix="$prefix/"
             ;;
@@ -317,10 +317,10 @@ create_feature_branch() {
     echo ""
 
     prompt "Branch name (without prefix): "
-    read -r branch_name
+    read -r branch_name || true
 
     # Sanitize branch name
-    branch_name=$(echo "$branch_name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | sed 's/[^a-z0-9\-]//g')
+    branch_name=$(echo "${branch_name:-}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | sed 's/[^a-z0-9\-]//g')
 
     if [[ -z "$branch_name" ]]; then
         error "Branch name cannot be empty."
@@ -536,7 +536,7 @@ commit_and_push() {
         6) commit_prefix="chore" ;;
         7)
             prompt "Enter commit type: "
-            read -r commit_prefix
+            read -r commit_prefix || true
             ;;
         *)
             error "Invalid selection."
@@ -725,10 +725,10 @@ _interactive_file_staging() {
         info "Using selection: $file_selection"
     else
         prompt "Files to stage: "
-        read -r file_selection
+        read -r file_selection || true
     fi
 
-    if [[ "$(echo "$file_selection" | tr -d '\r')" =~ ^[Aa]$ ]]; then
+    if [[ "$(echo "${file_selection:-}" | tr -d '\r')" =~ ^[Aa]$ ]]; then
         git add -A
         info "All files staged."
         return
@@ -738,7 +738,7 @@ _interactive_file_staging() {
     # Strip \r (Windows CRLF) so "1,4" from terminal is parsed correctly
     local selected_indices=()
     local normalized
-    normalized=$(echo "$file_selection" | tr -d '\r' | tr ',' ' ')
+    normalized=$(echo "${file_selection:-}" | tr -d '\r' | tr ',' ' ')
     read -ra parts <<< "$normalized"
     for part in "${parts[@]}"; do
         part=$(echo "$part" | tr -d ' \r')
@@ -824,8 +824,8 @@ sync_feature_branch() {
         echo ""
 
         prompt "Select base branch [1-${#base_branches[@]}]: "
-        read -r selection
-        selection=$(echo "$selection" | tr -d '\r')
+        read -r selection || true
+        selection=$(echo "${selection:-}" | tr -d '\r')
 
         if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#base_branches[@]} )); then
             error "Invalid selection."
@@ -908,8 +908,8 @@ merge_feature_to_base() {
     echo ""
 
     prompt "Select target branch [1-${#base_branches[@]}]: "
-    read -r selection
-    selection=$(echo "$selection" | tr -d '\r')
+    read -r selection || true
+    selection=$(echo "${selection:-}" | tr -d '\r')
 
     if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#base_branches[@]} )); then
         error "Invalid selection."
@@ -986,14 +986,14 @@ stash_management() {
     echo ""
 
     prompt "Selection [1-6]: "
-    read -r choice
-    choice=$(echo "$choice" | tr -d '\r')
+    read -r choice || true
+    choice=$(echo "${choice:-}" | tr -d '\r')
 
     case "$choice" in
         1)
             prompt "Stash message (optional): "
-            read -r stash_msg
-            if [[ -n "$stash_msg" ]]; then
+            read -r stash_msg || true
+            if [[ -n "${stash_msg:-}" ]]; then
                 git stash push -m "$stash_msg" --include-untracked
             else
                 git stash push --include-untracked
@@ -1020,7 +1020,7 @@ stash_management() {
             git stash list
             echo ""
             prompt "Enter stash index to drop (e.g. 0): "
-            read -r stash_idx
+            read -r stash_idx || true
             git stash drop "stash@{$stash_idx}" && info "Stash dropped." || error "Invalid stash index."
             ;;
         6)
@@ -1048,8 +1048,8 @@ view_log() {
     echo ""
 
     prompt "Selection [1-3]: "
-    read -r choice
-    choice=$(echo "$choice" | tr -d '\r')
+    read -r choice || true
+    choice=$(echo "${choice:-}" | tr -d '\r')
 
     case "$choice" in
         1)
@@ -1062,7 +1062,7 @@ view_log() {
             ;;
         3)
             prompt "Compare against which base branch? (e.g. development): "
-            read -r base
+            read -r base || true
             echo ""
             if branch_exists_local "$base"; then
                 git log --oneline "$base..HEAD"
@@ -1139,8 +1139,8 @@ branch_cleanup() {
     echo ""
 
     prompt "Selection [1-3]: "
-    read -r choice
-    choice=$(echo "$choice" | tr -d '\r')
+    read -r choice || true
+    choice=$(echo "${choice:-}" | tr -d '\r')
 
     case "$choice" in
         1|2)
@@ -1221,8 +1221,8 @@ resolve_conflicts() {
         echo -e "    ${BOLD}4)${NC} Abort $op and return to previous state"
         echo ""
         prompt "Selection [1-4]: "
-        read -r choice
-        choice=$(echo "$choice" | tr -d '\r')
+        read -r choice || true
+        choice=$(echo "${choice:-}" | tr -d '\r')
         case "$choice" in
             1)
                 git add -A
@@ -1249,7 +1249,7 @@ resolve_conflicts() {
                 done <<< "$conflicted"
                 echo ""
                 prompt "Enter file number(s) to stage (e.g. 1,3 or 1 3): "
-                read -r nums
+                read -r nums || true
                 nums=$(echo "$nums" | tr -d '\r' | tr ',' ' ')
                 for n in $nums; do
                     n=$(echo "$n" | tr -d ' \r')
@@ -1260,8 +1260,8 @@ resolve_conflicts() {
                 done
                 if in_rebase_state; then
                     prompt "Continue rebase now? [y/N]: "
-                    read -r cont
-                    cont=$(echo "$cont" | tr -d '\r')
+                    read -r cont || true
+                    cont=$(echo "${cont:-}" | tr -d '\r')
                     [[ "$cont" =~ ^[Yy]$ ]] && git rebase --continue 2>/dev/null && info "Rebase continued."
                 fi
                 ;;
@@ -1329,8 +1329,8 @@ main_menu() {
         echo ""
 
         prompt "Selection: "
-        read -r choice
-        choice=$(echo "$choice" | tr -d '\r')
+        read -r choice || true
+        choice=$(echo "${choice:-}" | tr -d '\r')
 
         case "$choice" in
             1) create_feature_branch ;;
@@ -1348,7 +1348,7 @@ main_menu() {
 
         echo ""
         prompt "Press Enter to return to main menu..."
-        read -r
+        read -r _ || true
     done
 }
 

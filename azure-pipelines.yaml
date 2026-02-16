@@ -8,10 +8,10 @@ resources:
 variables:
   vmImageName: "ubuntu-latest"
   pythonVersion: "3.12"
-  repositoryPath: "/opt/data_integration/data-services-datamart-analytics"
-  projectName: "data-services-datamart-analytics"
+  repositoryPath: "/opt/data_integration/bluemoon-data-platform"
+  projectName: "bluemoon-data-platform"
   gitBranch: "release"
-  repositoryURL: "longtermcaregroup@vs-ssh.visualstudio.com:v3/longtermcaregroup/LTCG/data-services-datamart"
+  repositoryURL: "longtermcaregroup@vs-ssh.visualstudio.com:v3/longtermcaregroup/LTCG/bluemoon-data-platform"
 
 trigger:
   branches:

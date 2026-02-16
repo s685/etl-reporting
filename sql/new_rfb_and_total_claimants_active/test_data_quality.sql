@@ -337,6 +337,66 @@ SELECT
     'Distribution of claim statuses - verify expected patterns' AS BUSINESS_IMPACT
 FROM IDENTIFIER($report_table);
 
+-- Test 8.4: Source vs Target count comparison
+-- Compares count from source CTEs (eob_ranking + care_mgmt_ranking) with target table count
+WITH 
+-- Episode of Benefit latest records
+eob AS (
+    SELECT
+        episode_of_benefit_id,
+        rfb_id,
+        eb_decision_dt,
+        last_mod_dt,
+        sequence_no
+    FROM {{SOURCE_DATABASE}}.dbo.episode_of_benefit
+    WHERE last_mod_dt <= $REPORT_END_DT
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY episode_of_benefit_id ORDER BY last_mod_dt DESC, sequence_no DESC) = 1
+),
+-- EOB ranking with first decision date per RFB
+eob_ranking AS (
+    SELECT
+        rfb_id,
+        MIN(eb_decision_dt) OVER (PARTITION BY rfb_id) AS firstebdecisiondt,
+        ROW_NUMBER() OVER (PARTITION BY rfb_id ORDER BY eb_decision_dt) AS firstebdecisiondt_rank
+    FROM eob
+),
+-- Care Management Service latest records
+care_mgmt AS (
+    SELECT
+        rfb_id,
+        contracted_service_id,
+        cms_end_dt,
+        sequenced_at
+    FROM {{SOURCE_DATABASE}}.dbo.care_mgmt_service
+    WHERE sequenced_at <= $REPORT_END_DT
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY rfb_id, contracted_service_id ORDER BY sequenced_at DESC, sequence_no DESC) = 1
+),
+-- Care Management ranking for specific service types
+care_mgmt_ranking AS (
+    SELECT rfb_id
+    FROM care_mgmt
+    WHERE contracted_service_id IN (28, 31, 48, 47, 77)
+      AND cms_end_dt BETWEEN TO_DATE($REPORT_START_DT) AND TO_DATE($REPORT_END_DT)
+),
+-- Source count: UNION of eob_ranking and care_mgmt_ranking
+source_data AS (
+    SELECT rfb_id FROM eob_ranking
+    WHERE firstebdecisiondt BETWEEN TO_DATE($REPORT_START_DT) AND TO_DATE($REPORT_END_DT)
+      AND firstebdecisiondt_rank = 1
+    UNION
+    SELECT rfb_id FROM care_mgmt_ranking
+)
+SELECT 
+    'DQ-024: Source vs Target Count Match' AS TEST_ID,
+    CASE WHEN source_count = target_count THEN 'PASS' ELSE 'FAIL' END AS STATUS,
+    ABS(source_count - target_count) AS FAILED_ROWS,
+    'Source count (' || source_count || ') must match target count (' || target_count || ')' AS BUSINESS_IMPACT
+FROM (
+    SELECT 
+        (SELECT COUNT(*) FROM source_data) AS source_count,
+        (SELECT COUNT(*) FROM IDENTIFIER($report_table)) AS target_count
+);
+
 -- =====================================================================
 -- FINAL SUMMARY
 -- =====================================================================
