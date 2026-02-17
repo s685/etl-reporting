@@ -3,6 +3,11 @@
 --// Input Params: p_date          - The date to find the next working day for
 --//              p_holiday_type  - Holiday category ['LTCG','FEDERAL']
 --//
+--// Returns:     The next working day (DATE) after p_date, or NULL if:
+--//              - p_holiday_type is NULL or not in ('LTCG','FEDERAL')
+--//              - p_date is not found in RPT_CALENDAR_DAY
+--//              - No next working day exists in the calendar
+--//
 --// Modification History:
 --// Date       #    By           Description
 --// ??/??/??   ????              Created.
@@ -11,21 +16,32 @@
 --//                              only going into recursion a few levels, so
 --//                              should not be performance hit.
 --// 03/09/10        gmakepeace   Refactor: replace recursive CTE with TOP/APPLY
---// 02/17/26                     Converted from SQL Server to Snowflake:
---//                              - OUTER APPLY + TOP(1) -> simplified single-table query + LIMIT 1
---//                              - DATETIME -> DATE (Snowflake DATE has no time component)
---//                              - SQL Server variable syntax -> Snowflake SQL Scripting
+--// 02/17/26                     Converted from SQL Server to Snowflake.
 --//
---// Conversion Notes:
---//   The original SQL Server version used OUTER APPLY to join the input date's
---//   calendar row (Cur) with the next working day row (Next). In Snowflake, this
---//   is simplified to a direct single-table query since the self-join through Cur
---//   only served to anchor on the input date — we can use the input parameter directly.
+--// Conversion Notes (SQL Server -> Snowflake):
+--//
+--//   1. Function type: SQL Server scalar function -> Snowflake pure SQL UDF
+--//      (Snowflake Scripting UDFs do NOT support SQL statements like SELECT;
+--//       must use a pure SQL expression UDF instead)
+--//
+--//   2. OUTER APPLY + TOP(1) -> single-table query with MIN()
+--//      The original self-joined RPT_CALENDAR_DAY via OUTER APPLY to find the
+--//      next row. In Snowflake, this simplifies to a direct MIN() query since
+--//      the self-join only anchored on the input date.
+--//
+--//   3. IF validation -> CASE expression
+--//      SQL Server IF/RETURN becomes a CASE wrapper around the query. Invalid
+--//      p_holiday_type naturally returns NULL because the CASE inside WHERE
+--//      evaluates to NULL, making no rows match, so MIN() returns NULL.
+--//
+--//   4. DATETIME -> DATE
+--//      Snowflake DATE has no time component, so the original time-stripping
+--//      logic (CAST(FLOOR(CAST(@pDate AS FLOAT)) AS DATETIME)) is unnecessary.
+--//
+--//   5. Parameters referenced directly by name (no @ or : prefix).
+--//      No semicolon inside the UDF body per Snowflake documentation.
 --//
 --//   Original SQL Server behavior preserved:
---//     - Returns NULL if p_holiday_type is NULL or not in ('LTCG','FEDERAL')
---//     - Returns NULL if p_date is not found in RPT_CALENDAR_DAY
---//     - Returns NULL if no next working day exists in the calendar
 --//     - Skips weekends (is_weekday = 'N')
 --//     - Skips holidays based on type:
 --//         LTCG    -> skips rows where is_admin_holiday = 'Y'
@@ -39,55 +55,18 @@ RETURNS DATE
 LANGUAGE SQL
 AS
 $$
-DECLARE
-    v_return_date  DATE;
-    v_date_exists  BOOLEAN DEFAULT FALSE;
-BEGIN
-    -------------------------------------------------------------------------
-    -- Step 1: Validate parameters
-    --         Original: IF @pHolidayType IS NULL OR @pHolidayType NOT IN ('LTCG','FEDERAL') RETURN NULL
-    -------------------------------------------------------------------------
-    IF (p_holiday_type IS NULL OR p_holiday_type NOT IN ('LTCG', 'FEDERAL')) THEN
-        RETURN NULL;
-    END IF;
-
-    -------------------------------------------------------------------------
-    -- Step 2: Verify input date exists in calendar table
-    --         Original SQL Server implicitly returned NULL when the input date
-    --         was not found in RPT_CALENDAR_DAY (the WHERE Cur.full_date = @Date
-    --         returned zero rows). We preserve this behavior explicitly.
-    -------------------------------------------------------------------------
-    SELECT TRUE INTO :v_date_exists
-    FROM ds.RPT_CALENDAR_DAY
-    WHERE full_date = :p_date
-    LIMIT 1;
-
-    IF (NOT v_date_exists) THEN
-        RETURN NULL;
-    END IF;
-
-    -------------------------------------------------------------------------
-    -- Step 3: Derive next business day
-    --         Original used OUTER APPLY + TOP(1) to self-join RPT_CALENDAR_DAY.
-    --         Simplified to a direct query: find the first date after p_date
-    --         that is a weekday AND not a holiday for the given holiday type.
-    --
-    --         The CASE expression maps the holiday_type to the correct column:
-    --           LTCG    -> check is_admin_holiday
-    --           FEDERAL -> check is_us_civil_holiday
-    --         We require the holiday flag = 'N' (not a holiday).
-    -------------------------------------------------------------------------
-    SELECT full_date INTO :v_return_date
-    FROM ds.RPT_CALENDAR_DAY
-    WHERE is_weekday = 'Y'
-      AND full_date > :p_date
-      AND 'N' = CASE :p_holiday_type
-                    WHEN 'LTCG'    THEN is_admin_holiday
-                    WHEN 'FEDERAL' THEN is_us_civil_holiday
-                END
-    ORDER BY full_date ASC
-    LIMIT 1;
-
-    RETURN v_return_date;
-END;
-$$;
+    SELECT MIN(o.full_date)
+    FROM ds.RPT_CALENDAR_DAY o
+    WHERE o.is_weekday = 'Y'
+      AND o.full_date > p_date
+      AND CASE p_holiday_type
+              WHEN 'LTCG'    THEN o.is_admin_holiday
+              WHEN 'FEDERAL' THEN o.is_us_civil_holiday
+          END = 'N'
+      AND EXISTS (
+              SELECT 1
+              FROM ds.RPT_CALENDAR_DAY c
+              WHERE c.full_date = p_date
+          )
+$$
+;
