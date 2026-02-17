@@ -29,10 +29,10 @@
 --//      next row. In Snowflake, this simplifies to a direct MIN() query since
 --//      the self-join only anchored on the input date.
 --//
---//   3. IF validation -> CASE expression
---//      SQL Server IF/RETURN becomes a CASE wrapper around the query. Invalid
---//      p_holiday_type naturally returns NULL because the CASE inside WHERE
---//      evaluates to NULL, making no rows match, so MIN() returns NULL.
+--//   3. IF validation -> IFF() guard
+--//      SQL Server IF/RETURN NULL maps to Snowflake IFF() which short-circuits:
+--//      if p_holiday_type is NULL or invalid, returns NULL immediately without
+--//      scanning RPT_CALENDAR_DAY (same behavior as the original).
 --//
 --//   4. DATETIME -> DATE
 --//      Snowflake DATE has no time component, so the original time-stripping
@@ -42,6 +42,8 @@
 --//      No semicolon inside the UDF body per Snowflake documentation.
 --//
 --//   Original SQL Server behavior preserved:
+--//     - Returns NULL immediately for NULL/invalid p_holiday_type (explicit guard)
+--//     - Returns NULL if p_date not found in RPT_CALENDAR_DAY
 --//     - Skips weekends (is_weekday = 'N')
 --//     - Skips holidays based on type:
 --//         LTCG    -> skips rows where is_admin_holiday = 'Y'
@@ -55,18 +57,38 @@ RETURNS DATE
 LANGUAGE SQL
 AS
 $$
-    SELECT MIN(o.full_date)
-    FROM ds.RPT_CALENDAR_DAY o
-    WHERE o.is_weekday = 'Y'
-      AND o.full_date > p_date
-      AND CASE p_holiday_type
-              WHEN 'LTCG'    THEN o.is_admin_holiday
-              WHEN 'FEDERAL' THEN o.is_us_civil_holiday
-          END = 'N'
-      AND EXISTS (
-              SELECT 1
-              FROM ds.RPT_CALENDAR_DAY c
-              WHERE c.full_date = p_date
-          )
+    --// Original SQL Server:
+    --//   IF @pHolidayType IS NULL OR @pHolidayType NOT IN ('LTCG','FEDERAL') RETURN NULL
+    --// Snowflake equivalent: IFF() guard wraps the entire query.
+    --// When p_holiday_type is NULL or invalid, returns NULL immediately
+    --// without executing the subquery (short-circuit evaluation).
+    IFF(
+        p_holiday_type IS NULL OR p_holiday_type NOT IN ('LTCG', 'FEDERAL'),
+        NULL,
+        --// Original SQL Server:
+        --//   SELECT @ReturnDate = Next.full_date
+        --//     FROM ds.RPT_CALENDAR_DAY Cur
+        --//     OUTER APPLY (SELECT TOP(1) O.full_date
+        --//                  FROM ds.RPT_CALENDAR_DAY O
+        --//                  WHERE O.is_weekday = 'Y'
+        --//                    AND 'N' = CASE @pHolidayType ... END
+        --//                    AND O.full_date > Cur.full_date
+        --//                  ORDER BY full_date ASC) AS Next
+        --//     WHERE Cur.full_date = @Date
+        (SELECT MIN(o.full_date)
+         FROM ds.RPT_CALENDAR_DAY o
+         WHERE o.is_weekday = 'Y'
+           AND o.full_date > p_date
+           AND CASE p_holiday_type
+                   WHEN 'LTCG'    THEN o.is_admin_holiday
+                   WHEN 'FEDERAL' THEN o.is_us_civil_holiday
+               END = 'N'
+           AND EXISTS (
+                   SELECT 1
+                   FROM ds.RPT_CALENDAR_DAY c
+                   WHERE c.full_date = p_date
+               )
+        )
+    )
 $$
 ;
