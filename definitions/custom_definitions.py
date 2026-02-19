@@ -81,3 +81,16 @@ class SnowflakeAuthenticatorType(str, Enum):
 
     EXTERNALBROWSER = "EXTERNALBROWSER"
     SNOWFLAKE_JWT = "SNOWFLAKE_JWT"
+
+
+class SourceTargetDatabaseConnectionType(str, Enum):
+    """Enum for source-to-target database connection type in test framework."""
+
+    SNOWFLAKE_TO_SNOWFLAKE = "SNOWFLAKE_TO_SNOWFLAKE"
+    SQLSERVER_TO_SNOWFLAKE = "SQLSERVER_TO_SNOWFLAKE"
+
+
+class SQLServerODBCVersion(str, Enum):
+    """Enum for SQL Server ODBC driver version."""
+
+    MS_ODBC_DRIVER_18 = "ODBC Driver 18 for SQL Server"
