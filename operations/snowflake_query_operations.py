@@ -1,5 +1,8 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING
 from snowflake.snowpark.session import Session
-from datamart_analytics.connector.snowpark_connector import SnowparkConnector
+if TYPE_CHECKING:
+    from datamart_analytics.connector.snowpark_connector import SnowparkConnector
 from datamart_analytics.definitions.custom_definitions import (
     DatamartFrameworkTable,
 )

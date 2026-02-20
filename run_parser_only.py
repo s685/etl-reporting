@@ -1,0 +1,12 @@
+﻿import argparse
+parser = argparse.ArgumentParser(description='Run the test framework with Snowflake connection parameters.')
+parser.add_argument('--source_database_name', type=str, required=True, help='Snowflake source database name.')
+parser.add_argument('--target_database_name', type=str, required=True, help='Snowflake target database name.')
+parser.add_argument('--database_warehouse', type=str, required=True, help='Snowflake warehouse name.')
+parser.add_argument('--table_schema_name', type=str, required=True, help='Snowflake schema name.')
+parser.add_argument('--specification_csv_path', type=str, help='Path to the test specification CSV file.')
+parser.add_argument('--source_target_database_connection_type', type=str, default='SNOWFLAKE_TO_SNOWFLAKE', help='Source to target connection type.')
+parser.add_argument('--sql_server_host', type=str, help='SQL Server host name.')
+parser.add_argument('--sql_server_port', type=int, default=1433, help='SQL Server port number.')
+parser.add_argument('--sql_to_snowflake_query_file_path', type=str, help='Path to the SQL to Snowflake query file.')
+parser.parse_args()

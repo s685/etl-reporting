@@ -1,3 +1,4 @@
+from typing import List, Optional
 from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 from datamart_analytics.definitions.custom_definitions import (
@@ -13,7 +14,7 @@ class SnowflakeCredentials(BaseModel):
     """
 
     user: str = Field(..., description="Snowflake user name")
-    password: str | None = Field(
+    password: Optional[str] = Field(
         default=None, description="Snowflake password (optional for SSO)"
     )
     account: str = Field(..., description="Snowflake account name")
@@ -23,15 +24,15 @@ class SnowflakeCredentials(BaseModel):
         default="DBO", description="Snowflake schema name for the database"
     )
     role: str = Field(..., description="Snowflake role name")
-    authenticator: SnowflakeAuthenticatorType | None = Field(
+    authenticator: Optional[SnowflakeAuthenticatorType] = Field(
         default=None,
         description="Authentication method (e.g., 'snowflake' or 'externalbrowser')",
     )
-    private_key_file: str | None = Field(
+    private_key_file: Optional[str] = Field(
         default=None,
         description="Path to the private key file for key pair authentication",
     )
-    private_key_password: str | None = Field(
+    private_key_password: Optional[str] = Field(
         default=None, description="Password for the private key file"
     )
 
@@ -45,27 +46,27 @@ class DatamartTable(BaseModel):
     name: str = Field(..., description="Name of the datamart")
     source_database: str = Field(..., description="Source database name")
     source_schema: str = Field(..., description="Source schema name")
-    source_warehouse: str | None = Field(default=None, description="Source warehouse name (optional)")
-    source_table: str | None = Field(default=None, description="Source table name (optional)")
+    source_warehouse: Optional[str] = Field(default=None, description="Source warehouse name (optional)")
+    source_table: Optional[str] = Field(default=None, description="Source table name (optional)")
     target_database: str = Field(..., description="Target database name")
     target_schema: str = Field(..., description="Target schema name")
     target_warehouse: str = Field(..., description="Target warehouse name")
-    target_table: str | None = Field(default=None, description="Target table name (optional - reports may create multiple tables)")
+    target_table: Optional[str] = Field(default=None, description="Target table name (optional - reports may create multiple tables)")
     carrier_name: str = Field(..., description="Carrier name")
-    last_load_date: str | None = Field(
+    last_load_date: Optional[str] = Field(
         default=None,
         description="Last load date for incremental data extraction (format: 'YYYY-MM-DD HH:MM:SS').",
     )
-    report_start_dt: str | None = Field(
+    report_start_dt: Optional[str] = Field(
         default=None, description="Report start datetime (YYYY-MM-DD HH:MM:SS)"
     )
-    report_end_dt: str | None = Field(
+    report_end_dt: Optional[str] = Field(
         default=None, description="Report end datetime (YYYY-MM-DD HH:MM:SS)"
     )
-    as_of_run_dt: str | None = Field(
+    as_of_run_dt: Optional[str] = Field(
         default=None, description="As of run datetime (YYYY-MM-DD HH:MM:SS)"
     )
-    report_run_dt: str | None = Field(
+    report_run_dt: Optional[str] = Field(
         default=None, description="Report run datetime (YYYY-MM-DD HH:MM:SS)"
     )
 
@@ -80,7 +81,7 @@ class DatamartTable(BaseModel):
         "target_table",
     )
     @classmethod
-    def convert_to_upper(cls, value: str | None) -> str | None:
+    def convert_to_upper(cls, value: Optional[str]) -> Optional[str]:
         """
         Convert the value to uppercase.
 
@@ -112,7 +113,7 @@ class ExecutionLog(BaseModel):
     execution_start_ts: str = Field(
         description="Timestamp of the execution log in ISO format",
     )
-    execution_end_ts: str | None = Field(
+    execution_end_ts: Optional[str] = Field(
         default=None,
         description="End timestamp of the execution log in ISO format",
     )
@@ -150,7 +151,7 @@ class ExecutionLog(BaseModel):
         default=0, description="Number of records deleted during the execution"
     )
     carrier_name: str = Field(description="Carrier name for the execution log")
-    error_message: str | None = Field(
+    error_message: Optional[str] = Field(
         default=None, description="Error message if the execution failed"
     )
 
@@ -170,22 +171,22 @@ class UpsertResult(BaseModel):
     target_table: str = Field(
         description="Target table name for the upsert operation"
     )
-    join_keys: list[str] = Field(
+    join_keys: List[str] = Field(
         description="List of join keys used in the upsert operation"
     )
-    update_columns: list[str] | None = Field(
+    update_columns: Optional[List[str]] = Field(
         default=None, description="List of columns updated during the upsert"
     )
-    insert_columns: list[str] | None = Field(
+    insert_columns: Optional[List[str]] = Field(
         default=None, description="List of columns inserted during the upsert"
     )
-    delete_columns: list[str] | None = Field(
+    delete_columns: Optional[List[str]] = Field(
         default=None, description="List of columns deleted during the upsert"
     )
-    when_matched_condition: str | None = Field(
+    when_matched_condition: Optional[str] = Field(
         default=None, description="Condition for when matched in the upsert"
     )
-    when_not_matched_condition: str | None = Field(
+    when_not_matched_condition: Optional[str] = Field(
         default=None, description="Condition for when not matched in the upsert"
     )
     use_when_matching_condition: bool = Field(
@@ -222,16 +223,16 @@ class DatamartTable_integrated(BaseModel):
     carrier_name: str = Field(..., description="Carrier name")
     carrier_type: str = Field(..., description="Type of carrier used for the DataMart table")
     folder_name: str = Field(..., description="Folder name where the SQL files are located")
-    report_start_dt: str | None = Field(
+    report_start_dt: Optional[str] = Field(
         default=None, description="Report start datetime (YYYY-MM-DD HH:MM:SS)"
     )
-    report_end_dt: str | None = Field(
+    report_end_dt: Optional[str] = Field(
         default=None, description="Report end datetime (YYYY-MM-DD HH:MM:SS)"
     )
-    as_of_run_dt: str | None = Field(
+    as_of_run_dt: Optional[str] = Field(
         default=None, description="As of run datetime (YYYY-MM-DD HH:MM:SS)"
     )
-    report_run_dt: str | None = Field(
+    report_run_dt: Optional[str] = Field(
         default=None, description="Report run datetime (YYYY-MM-DD HH:MM:SS)"
     )
     # load_type: str = Field(..., description="full load or incremental load")
@@ -269,22 +270,22 @@ class TableConfiguration(BaseModel):
     """
 
     name: str = Field(..., description="Name of the Table")
-    source_table_name: str | None = Field(
+    source_table_name: Optional[str] = Field(
         default=None, description="Source table name for the Table"
     )
     target_table_name: str = Field(..., description="Target table name for the Table")
-    join_keys: list[str] = Field(..., description="List of join keys for the Table")
-    update_columns: list[str] | None = Field(
+    join_keys: List[str] = Field(..., description="List of join keys for the Table")
+    update_columns: Optional[List[str]] = Field(
         default=None, description="List of columns to update in the Table"
     )
-    insert_columns: list[str] | None = Field(
+    insert_columns: Optional[List[str]] = Field(
         default=None, description="List of columns to insert in the Table"
     )
-    when_matched_condition: str | None = Field(
+    when_matched_condition: Optional[str] = Field(
         default=None,
         description="Condition for when matched in merge for the Table",
     )
-    when_not_matched_condition: str | None = Field(
+    when_not_matched_condition: Optional[str] = Field(
         default=None,
         description="Condition for when not matched in merge for the Table",
     )

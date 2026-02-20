@@ -105,3 +105,11 @@ class OneOrMoreTestCasesFailedException(TestFrameworkException):
 
     def __init__(self, message: str):
         super().__init__(message)
+
+class CompareSQLToSnowflakeException(TestFrameworkException):
+    """
+    Raised when comparing SQL query and Snowflake data fails.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message)
