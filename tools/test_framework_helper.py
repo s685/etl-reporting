@@ -650,6 +650,10 @@ def compare_sql_server_and_snowflake_result_df(
     # Normalize column names (strip and uppercase)
     sql_server_result_df = sql_server_result_df.copy()
     snowflake_result_df = snowflake_result_df.copy()
+    if snowflake_result_df.empty and len(snowflake_result_df.columns) == 0:
+        # collect() on an empty Snowflake result can yield an empty DataFrame with no columns.
+        # Use SQL Server columns as expected shape so mismatch is reported as row diffs, not schema error.
+        snowflake_result_df = pd.DataFrame(columns=sql_server_result_df.columns)
     sql_server_result_df.columns = [col.strip().upper() for col in sql_server_result_df.columns]
     snowflake_result_df.columns = [col.strip().upper() for col in snowflake_result_df.columns]
 
@@ -779,9 +783,19 @@ def compare_source_sql_to_target_snowflake_data(
                 snowflake_query_result = sq.execute_query(test_case['final_rendered_snowflake_query'], lazy=True)
                 if snowflake_query_result is not None:
                     if hasattr(snowflake_query_result, "collect"):
-                        snowflake_result_df = pd.DataFrame([row.as_dict() for row in snowflake_query_result.collect()])
+                        snowflake_rows = snowflake_query_result.collect()
+                        if snowflake_rows:
+                            snowflake_result_df = pd.DataFrame([row.as_dict() for row in snowflake_rows])
+                        else:
+                            snowflake_columns = []
+                            if hasattr(snowflake_query_result, "schema") and hasattr(snowflake_query_result.schema, "fields"):
+                                snowflake_columns = [field.name for field in snowflake_query_result.schema.fields]
+                            snowflake_result_df = pd.DataFrame(columns=snowflake_columns)
                     elif isinstance(snowflake_query_result, list):
-                        snowflake_result_df = pd.DataFrame([row.as_dict() for row in snowflake_query_result])
+                        if snowflake_query_result:
+                            snowflake_result_df = pd.DataFrame([row.as_dict() for row in snowflake_query_result])
+                        else:
+                            snowflake_result_df = pd.DataFrame()
                     else:
                         raise Exception("Unexpected result type from SnowparkConnector.execute_query.")
                 else:
