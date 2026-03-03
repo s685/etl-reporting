@@ -1,0 +1,177 @@
+# ********************************************************************************
+# Application Activity Report - Period
+# YAML Configuration for yaml_multi_worksheet_template.py
+#
+# PURPOSE: Configure multi-worksheet Excel report from a single Snowflake table.
+#          Each unique value in grouping_column becomes a separate worksheet.
+#          Supports multi-level merged column headers.
+#
+# USAGE:
+#   python yaml_multi_worksheet_template.py application_activity_report.yml \
+#       <database> <schema> <output_path> <output_file>.xlsx <carrier_name> \
+#       --warehouse <wh> --report_start_dt "01/01/2023" --report_end_dt "12/31/2023"
+# ********************************************************************************
+
+# ---- Required Keys ----
+carrier_name: "{carrier_name}"
+report_name: "Application Activity Report - Period"
+
+# Single source table (fully qualified: DATABASE.SCHEMA.TABLE)
+# UPDATE this to your actual table name
+table: "DATABASE.SCHEMA.APPLICATION_ACTIVITY_RPT"
+
+# Column whose unique values determine the worksheets (excluded from data display)
+grouping_column: "GROUP_NAME"
+
+# Session variable setup (supports {carrier_name}, {as_of_run_dt},
+# {report_start_dt}, {report_end_dt}, {report_run_dt} interpolation)
+pre_sql_query: |
+  SET carrier_name = '{carrier_name}';
+  SET report_start_dt = '{report_start_dt}';
+  SET report_end_dt = '{report_end_dt}';
+
+# ---- Header / Layout ----
+header: true
+group_name_row: true
+
+# ---- Data Options ----
+exclude_columns: []
+filter_rows: null
+sorting_columns: []
+
+# Name for worksheet containing rows where grouping_column IS NULL
+null_group_sheet_name: "Unassigned"
+
+# ---- Percentage Columns ----
+# Columns stored as decimals (0.15) that should display as 15.0%
+# UPDATE these to match your actual Snowflake column names
+percent_columns:
+  - "AGE_LT65_MALE_PCT"
+  - "AGE_LT65_FEMALE_PCT"
+  - "AGE_LT65_ND_PCT"
+  - "AGE_65_74_MALE_PCT"
+  - "AGE_65_74_FEMALE_PCT"
+  - "AGE_65_74_ND_PCT"
+  - "AGE_75PLUS_MALE_PCT"
+  - "AGE_75PLUS_FEMALE_PCT"
+  - "AGE_75PLUS_ND_PCT"
+  - "ALL_MALE_PCT"
+  - "ALL_FEMALE_PCT"
+  - "ALL_ND_PCT"
+
+# Dollar formatted columns (if any)
+dollar_columns: []
+
+# ---- Multi-Level Column Headers ----
+# Replaces flat column names with merged header rows.
+# Each level is a list of {label, span} entries.
+# Sum of spans per level MUST equal total data columns (after excluding grouping_column).
+# 26 columns: 1 (Application_Description) + 6 (Age<65) + 6 (Age65-74) + 6 (Age75+) + 6 (All) + 1 (Total)
+multi_level_headers:
+  # Level 1 - Age Groups
+  - - {label: "", span: 1}
+    - {label: "Age < 65", span: 6}
+    - {label: "Age 65-74", span: 6}
+    - {label: "Age 75+", span: 6}
+    - {label: "All", span: 7}
+
+  # Level 2 - Gender
+  - - {label: "", span: 1}
+    - {label: "Male", span: 2}
+    - {label: "Female", span: 2}
+    - {label: "N/D*", span: 2}
+    - {label: "Male", span: 2}
+    - {label: "Female", span: 2}
+    - {label: "N/D*", span: 2}
+    - {label: "Male", span: 2}
+    - {label: "Female", span: 2}
+    - {label: "N/D*", span: 2}
+    - {label: "Male", span: 2}
+    - {label: "Female", span: 2}
+    - {label: "N/D*", span: 2}
+    - {label: "Total", span: 1}
+
+  # Level 3 - Metrics (No. / %)
+  - - {label: "", span: 1}
+    - {label: "No.", span: 1}
+    - {label: "%", span: 1}
+    - {label: "No.", span: 1}
+    - {label: "%", span: 1}
+    - {label: "No.", span: 1}
+    - {label: "%", span: 1}
+    - {label: "No.", span: 1}
+    - {label: "%", span: 1}
+    - {label: "No.", span: 1}
+    - {label: "%", span: 1}
+    - {label: "No.", span: 1}
+    - {label: "%", span: 1}
+    - {label: "No.", span: 1}
+    - {label: "%", span: 1}
+    - {label: "No.", span: 1}
+    - {label: "%", span: 1}
+    - {label: "No.", span: 1}
+    - {label: "%", span: 1}
+    - {label: "No.", span: 1}
+    - {label: "%", span: 1}
+    - {label: "No.", span: 1}
+    - {label: "%", span: 1}
+    - {label: "No.", span: 1}
+    - {label: "%", span: 1}
+    - {label: "", span: 1}
+
+# ---- Column Widths ----
+max_column_width: 8
+specific_column_widths:
+  - {column: "A", width: 35}
+
+# ---- Font Configuration ----
+# sheet_header_font: 3-row report header (carrier, report name, dates)
+sheet_header_font:
+  name: Calibri
+  size: 11
+  bold: true
+  color: "000000"
+  alignment: left
+  wrap_text: false
+  fill_color: "FFFFFF"
+  fill_type: solid
+
+# table_header_font: multi-level column header rows
+table_header_font:
+  name: Calibri
+  size: 9
+  bold: true
+  color: "FFFFFF"
+  alignment: center
+  wrap_text: true
+  fill_color: "4472C4"
+  fill_type: solid
+
+# table_data_font: data rows
+table_data_font:
+  name: Calibri
+  size: 9
+  bold: false
+  color: "000000"
+  alignment: right
+  wrap_text: false
+  fill_color: "FFFFFF"
+  fill_type: none
+
+# group_name_font: group name title row above table headers
+group_name_font:
+  name: Calibri
+  size: 11
+  bold: true
+  color: "000000"
+  alignment: left
+  wrap_text: false
+  fill_color: "D9E2F3"
+  fill_type: solid
+
+# ---- Border Configuration ----
+border_to_row:
+  border_to_table_headers: true
+  start_color: "000000"
+  end_color: "000000"
+  fill_type: solid
