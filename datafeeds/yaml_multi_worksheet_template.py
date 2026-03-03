@@ -320,8 +320,8 @@ class FileWriter:
                 cell.fill = PatternFill(fill_type=fill_type, fgColor=fill_color)
 
                 # Add "timestamp" on the same row as carrier_name
-                time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                time_info = f"Executed On: {time}"
+                time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                time_info = f"Executed On: {time_str}"
 
                 cell_offset = last_column // 2
                 time_cell = ws.cell(row=row, column=cell_offset + 1)
@@ -382,9 +382,10 @@ class FileWriter:
 
         # set the column widths in the excel file
     def set_column_widths(self, ws, max_column_width):
+        width = self.max_column_width or 15
         for col in range(1, ws.max_column + 1):
             col_index = get_column_letter(col)
-            ws.column_dimensions[col_index].width = self.max_column_width
+            ws.column_dimensions[col_index].width = width
 
     def set_specific_column_widths(self, data, ws):
         # Set column widths based on the YAML configuration
@@ -398,6 +399,8 @@ class FileWriter:
                     ws.column_dimensions[clmn].width = wdth
 
     def set_cell_properties(self, font):
+        if not font or not isinstance(font, dict):
+            return 'Calibri', 11, False, '000000', 'left', False, 'FFFFFF', 'solid'
         name = font['name']
         size = font['size']
         bold = font['bold']
@@ -582,10 +585,10 @@ def main():
     grouping_column = report['grouping_column']
     pre_sql_query = report['pre_sql_query'].format(
             carrier_name=args.carrier_name,
-            as_of_run_dt=args.as_of_run_dt,
-            report_start_dt=args.report_start_dt,
-            report_end_dt=args.report_end_dt,
-            report_run_dt=args.report_run_dt,
+            as_of_run_dt=args.as_of_run_dt or '',
+            report_start_dt=args.report_start_dt or '',
+            report_end_dt=args.report_end_dt or '',
+            report_run_dt=args.report_run_dt or '',
         )
 
     # optional keys in config file

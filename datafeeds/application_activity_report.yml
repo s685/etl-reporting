@@ -13,7 +13,7 @@
 # ********************************************************************************
 
 # ---- Required Keys ----
-carrier_name: "{carrier_name}"
+carrier_name: "New York Life Insurance Company"
 report_name: "Application Activity Report - Period"
 
 # Single source table (fully qualified: DATABASE.SCHEMA.TABLE)
