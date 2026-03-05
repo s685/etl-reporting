@@ -13,6 +13,7 @@
 #    • Safe branch cleanup after merge
 #    • Stash management
 #    • Pre-flight checks (clean tree, remote connectivity, branch existence)
+#    • Cherry-pick specific files from any source branch into a target branch
 #
 #  Linear History Strategy:
 #    Protected branches (main, release/*, development) use --ff-only merges.
@@ -1295,6 +1296,254 @@ resolve_conflicts() {
     fi
 }
 
+# ═════════════════════════════════════════════════════════════════════════════
+# 10. CHERRY-PICK SPECIFIC FILES FROM SOURCE BRANCH
+# ═════════════════════════════════════════════════════════════════════════════
+cherry_pick_files() {
+    print_header "Cherry-Pick Specific Files from Source Branch"
+
+    local current
+    current=$(current_branch)
+
+    # ── Select source branch ─────────────────────────────────────────────
+    print_section "Select Source Branch"
+
+    local all_branches=()
+    while IFS= read -r b; do
+        b=$(echo "$b" | tr -d ' *')
+        [[ -z "$b" || "$b" == "$current" ]] && continue
+        all_branches+=("$b")
+    done < <(git branch -a 2>/dev/null | sed 's|remotes/[^/]*/||;s|^[* ]*||' | sort -u)
+
+    if [[ ${#all_branches[@]} -eq 0 ]]; then
+        error "No other branches found to cherry-pick files from."
+        return 1
+    fi
+
+    echo ""
+    for i in "${!all_branches[@]}"; do
+        echo -e "    ${BOLD}$((i+1)))${NC} ${all_branches[$i]}"
+    done
+    echo ""
+
+    prompt "Select source branch [1-${#all_branches[@]}]: "
+    read -r selection || true
+    selection=$(echo "${selection:-}" | tr -d '\r')
+
+    if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#all_branches[@]} )); then
+        error "Invalid selection."
+        return 1
+    fi
+
+    local source_branch="${all_branches[$((selection-1))]}"
+    info "Source branch: $source_branch"
+
+    # ── Select target branch ─────────────────────────────────────────────
+    print_section "Select Target Branch (where files will be applied)"
+
+    local local_branches=()
+    while IFS= read -r b; do
+        b=$(echo "$b" | tr -d ' *')
+        [[ -z "$b" || "$b" == "$source_branch" ]] && continue
+        local_branches+=("$b")
+    done < <(git branch 2>/dev/null | sed 's|^[* ]*||' | sort -u)
+
+    echo ""
+    echo -e "    ${BOLD}1)${NC} Current branch: ${CYAN}$current${NC}  (stay here)"
+
+    local non_current_branches=()
+    for b in "${local_branches[@]}"; do
+        [[ "$b" == "$current" ]] && continue
+        non_current_branches+=("$b")
+    done
+
+    for i in "${!non_current_branches[@]}"; do
+        echo -e "    ${BOLD}$((i+2)))${NC} ${non_current_branches[$i]}"
+    done
+    echo ""
+
+    prompt "Select target branch [1-$((${#non_current_branches[@]}+1))]: "
+    read -r tsel || true
+    tsel=$(echo "${tsel:-1}" | tr -d '\r')
+
+    local target_branch="$current"
+    if [[ "$tsel" =~ ^[0-9]+$ ]] && (( tsel >= 2 && tsel <= ${#non_current_branches[@]}+1 )); then
+        target_branch="${non_current_branches[$((tsel-2))]}"
+    elif [[ ! "$tsel" =~ ^1$ ]]; then
+        error "Invalid selection. Using current branch '$current'."
+    fi
+
+    info "Target branch: $target_branch"
+
+    # Switch to target if different from current
+    if [[ "$target_branch" != "$current" ]]; then
+        if has_uncommitted_changes; then
+            warn "Uncommitted changes detected."
+            if confirm "Auto-stash before switching to '$target_branch'?"; then
+                git stash push -m "auto-stash before cherry-pick-files" --include-untracked
+            else
+                error "Cannot switch branches with uncommitted changes."
+                return 1
+            fi
+        fi
+        git checkout "$target_branch" --quiet
+        info "Switched to '$target_branch'."
+    fi
+
+    # ── List files that differ between source and target ─────────────────
+    print_section "Files Differing in '$source_branch' vs '$target_branch'"
+
+    local diff_files=()
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && diff_files+=("$f")
+    done < <(git diff --name-only "$target_branch" "$source_branch" 2>/dev/null)
+
+    if [[ ${#diff_files[@]} -eq 0 ]]; then
+        info "No file differences found between '$source_branch' and '$target_branch'."
+        return 0
+    fi
+
+    # Pre-fetch diff statuses in one call for performance
+    local diff_status_output
+    diff_status_output=$(git diff --name-status "$target_branch" "$source_branch" 2>/dev/null)
+
+    echo ""
+    echo -e "  ${BOLD}Changed files (source vs target):${NC}"
+    for i in "${!diff_files[@]}"; do
+        local diff_type
+        diff_type=$(echo "$diff_status_output" | awk -v f="${diff_files[$i]}" '$2==f{print $1; exit}')
+        local status_label
+        case "$diff_type" in
+            A*)  status_label="${GREEN}[added in source]${NC}" ;;
+            D*)  status_label="${RED}[deleted in source]${NC}" ;;
+            M*)  status_label="${YELLOW}[modified]${NC}" ;;
+            R*)  status_label="${CYAN}[renamed]${NC}" ;;
+            *)   status_label="${DIM}[changed]${NC}" ;;
+        esac
+        echo -e "    ${BOLD}$((i+1)))${NC} ${diff_files[$i]}  $status_label"
+    done
+    echo ""
+    dim "Select files to bring from '$source_branch' into '$target_branch'."
+    dim "Ranges: 1-5  |  All: 'a'  |  Example: 1,3,5-8"
+    echo ""
+
+    prompt "Files to cherry-pick: "
+    read -r file_selection || true
+    file_selection=$(echo "${file_selection:-}" | tr -d '\r')
+
+    # Parse selection into array of file paths
+    local selected_files=()
+    if [[ "$file_selection" =~ ^[Aa]$ ]]; then
+        selected_files=("${diff_files[@]}")
+    else
+        local normalized
+        normalized=$(echo "$file_selection" | tr ',' ' ')
+        read -ra parts <<< "$normalized"
+        for part in "${parts[@]}"; do
+            part=$(echo "$part" | tr -d ' \r')
+            if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                for (( idx=BASH_REMATCH[1]; idx<=BASH_REMATCH[2]; idx++ )); do
+                    local fidx=$((idx - 1))
+                    (( fidx >= 0 && fidx < ${#diff_files[@]} )) && selected_files+=("${diff_files[$fidx]}")
+                done
+            elif [[ "$part" =~ ^[0-9]+$ ]]; then
+                local fidx=$((part - 1))
+                (( fidx >= 0 && fidx < ${#diff_files[@]} )) && selected_files+=("${diff_files[$fidx]}")
+            fi
+        done
+    fi
+
+    if [[ ${#selected_files[@]} -eq 0 ]]; then
+        warn "No valid files selected. Aborting."
+        return 0
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Files to bring from '${source_branch}':${NC}"
+    for f in "${selected_files[@]}"; do
+        echo -e "    ${GREEN}→${NC} $f"
+    done
+    echo ""
+
+    if ! confirm "Apply these ${#selected_files[@]} file(s) from '$source_branch' into '$target_branch'?"; then
+        warn "Cherry-pick files cancelled."
+        return 0
+    fi
+
+    # ── Apply the selected files ──────────────────────────────────────────
+    local applied=0 failed=0
+    for f in "${selected_files[@]}"; do
+        local ftype
+        ftype=$(echo "$diff_status_output" | awk -v fl="$f" '$2==fl{print $1; exit}')
+        if [[ "$ftype" == D* ]]; then
+            # File deleted in source — remove it from target
+            if [[ -f "$f" ]]; then
+                git rm "$f" --quiet \
+                    && info "Removed (deleted in source): $f" \
+                    && applied=$((applied+1)) \
+                    || { warn "Failed to remove: $f"; failed=$((failed+1)); }
+            else
+                warn "Already absent locally: $f"
+            fi
+        else
+            if git checkout "$source_branch" -- "$f" 2>/dev/null; then
+                info "Applied: $f"
+                applied=$((applied+1))
+            else
+                warn "Failed to apply: $f"
+                failed=$((failed+1))
+            fi
+        fi
+    done
+
+    echo ""
+    info "$applied file(s) staged from '$source_branch'."
+    [[ $failed -gt 0 ]] && warn "$failed file(s) could not be applied."
+
+    echo ""
+    echo -e "  ${BOLD}Staged changes:${NC}"
+    git diff --cached --stat 2>/dev/null | sed 's/^/    /' || true
+    echo ""
+
+    # ── Optional commit ───────────────────────────────────────────────────
+    if confirm "Commit these cherry-picked files now?"; then
+        local default_msg="chore: cherry-pick files from ${source_branch} into ${target_branch}"
+        echo ""
+        echo -e "  ${BOLD}Default message:${NC} $default_msg"
+        prompt "Use default message? [Y/n]: "
+        read -r use_default || true
+        use_default=$(echo "${use_default:-y}" | tr -d '\r')
+
+        local commit_msg="$default_msg"
+        if [[ "$use_default" =~ ^[Nn]$ ]]; then
+            prompt "Enter commit message: "
+            read -r commit_msg || true
+            commit_msg=$(echo "$commit_msg" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            [[ -z "$commit_msg" ]] && commit_msg="$default_msg"
+        fi
+
+        git commit -m "$commit_msg"
+        info "Committed: $commit_msg"
+
+        # ── Optional push ─────────────────────────────────────────────────
+        if check_remote && confirm "Push '$target_branch' to $REMOTE?"; then
+            local upstream
+            upstream=$(git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null || echo "")
+            if [[ -z "$upstream" ]]; then
+                git push -u "$REMOTE" "$target_branch"
+            else
+                git push
+            fi
+            info "Pushed '$target_branch' to $REMOTE."
+        fi
+    else
+        warn "Files staged but not committed. Use 'Stage, Commit & Push' (option 2) when ready."
+    fi
+
+    echo ""
+    info "Cherry-pick files complete. Current branch: $(current_branch)"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN MENU
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1325,6 +1574,7 @@ main_menu() {
         echo -e "    ${BOLD}7)${NC} Setup Linear History Config (one-time)"
         echo -e "    ${BOLD}8)${NC} Branch Cleanup"
         echo -e "    ${BOLD}9)${NC} Resolve Rebase/Merge Conflicts"
+        echo -e "    ${BOLD}10)${NC} Cherry-Pick Specific Files from Branch"
         echo -e "    ${BOLD}q)${NC} Quit"
         echo ""
 
@@ -1342,6 +1592,7 @@ main_menu() {
             7) setup_linear_history ;;
             8) branch_cleanup ;;
             9) resolve_conflicts ;;
+            10) cherry_pick_files ;;
             q|Q) echo ""; info "Goodbye!"; echo ""; exit 0 ;;
             *) error "Invalid selection. Try again." ;;
         esac
