@@ -14,6 +14,7 @@
 #    • Stash management
 #    • Pre-flight checks (clean tree, remote connectivity, branch existence)
 #    • Cherry-pick specific files from any source branch into a target branch
+#    • Dev → Release workflow: select files, auto-create PR branch, push & surface PR URL
 #
 #  Linear History Strategy:
 #    Protected branches (main, release/*, development) use --ff-only merges.
@@ -1544,6 +1545,363 @@ cherry_pick_files() {
     info "Cherry-pick files complete. Current branch: $(current_branch)"
 }
 
+# ═════════════════════════════════════════════════════════════════════════════
+# 11. DEVELOPMENT → RELEASE: CHERRY-PICK FILES & RAISE PR
+# ═════════════════════════════════════════════════════════════════════════════
+dev_to_release_pr() {
+    print_header "Dev → Release: Cherry-Pick Files & Raise PR"
+
+    # ── Resolve development branch ───────────────────────────────────────
+    local dev_branch=""
+    for candidate in "development" "develop" "dev"; do
+        if branch_exists_local "$candidate"; then
+            dev_branch="$candidate"
+            break
+        fi
+        # Also check remote
+        if branch_exists_remote "$candidate"; then
+            dev_branch="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$dev_branch" ]]; then
+        error "No development branch found (tried: development, develop, dev)."
+        error "Please ensure your development branch exists locally or on $REMOTE."
+        return 1
+    fi
+    info "Development branch: $dev_branch"
+
+    # Make sure development is available locally and up-to-date
+    if ! branch_exists_local "$dev_branch"; then
+        info "Fetching '$dev_branch' from $REMOTE..."
+        git fetch "$REMOTE" "$dev_branch":"$dev_branch" --quiet 2>/dev/null \
+            || { error "Could not fetch '$dev_branch' from $REMOTE."; return 1; }
+    else
+        info "Updating '$dev_branch' from $REMOTE..."
+        git fetch "$REMOTE" "$dev_branch" --quiet 2>/dev/null || warn "Fetch failed — using local copy."
+        git branch -f "$dev_branch" "refs/remotes/$REMOTE/$dev_branch" 2>/dev/null || true
+    fi
+
+    # ── Select release branch ────────────────────────────────────────────
+    print_section "Select Target Release Branch"
+
+    local release_branches=()
+    # Gather all local release/* branches, plus 'main' / 'master' as fallback options
+    while IFS= read -r b; do
+        b=$(echo "$b" | tr -d ' *')
+        [[ -z "$b" || "$b" == "$dev_branch" ]] && continue
+        release_branches+=("$b")
+    done < <(
+        {
+            git branch --list 'release/*' 2>/dev/null
+            git branch --list 'main' 'master' 2>/dev/null
+        } | sed 's|^[* ]*||' | sort -u
+    )
+
+    # Also include remote-only release/* branches not yet checked out
+    while IFS= read -r rb; do
+        rb=$(echo "$rb" | sed 's|.*/||')
+        [[ -z "$rb" || "$rb" == "$dev_branch" ]] && continue
+        local already=false
+        for b in "${release_branches[@]}"; do [[ "$b" == "$rb" ]] && already=true && break; done
+        $already || release_branches+=("$rb")
+    done < <(git branch -r 2>/dev/null | grep -E 'release/' | sed 's|^[* ]*||')
+
+    if [[ ${#release_branches[@]} -eq 0 ]]; then
+        error "No release branches found (release/*, main, master)."
+        error "Please create a release branch first."
+        return 1
+    fi
+
+    echo ""
+    for i in "${!release_branches[@]}"; do
+        echo -e "    ${BOLD}$((i+1)))${NC} ${release_branches[$i]}"
+    done
+    echo ""
+
+    prompt "Select release branch [1-${#release_branches[@]}]: "
+    read -r sel || true
+    sel=$(echo "${sel:-}" | tr -d '\r')
+
+    if [[ ! "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > ${#release_branches[@]} )); then
+        error "Invalid selection."
+        return 1
+    fi
+
+    local release_branch="${release_branches[$((sel-1))]}"
+    info "Release branch: $release_branch"
+
+    # Ensure release branch exists locally
+    if ! branch_exists_local "$release_branch"; then
+        info "Checking out '$release_branch' from $REMOTE..."
+        git fetch "$REMOTE" "$release_branch":"$release_branch" --quiet 2>/dev/null \
+            || { error "Could not fetch '$release_branch'."; return 1; }
+    else
+        git fetch "$REMOTE" "$release_branch" --quiet 2>/dev/null || warn "Fetch failed."
+        git branch -f "$release_branch" "refs/remotes/$REMOTE/$release_branch" 2>/dev/null || true
+    fi
+
+    # ── Show files differing between dev and release ──────────────────────
+    print_section "Files Differing: '$dev_branch' vs '$release_branch'"
+
+    local diff_files=()
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && diff_files+=("$f")
+    done < <(git diff --name-only "$release_branch" "$dev_branch" 2>/dev/null)
+
+    if [[ ${#diff_files[@]} -eq 0 ]]; then
+        info "No differences found between '$dev_branch' and '$release_branch'."
+        return 0
+    fi
+
+    # Single call for all statuses
+    local diff_status_output
+    diff_status_output=$(git diff --name-status "$release_branch" "$dev_branch" 2>/dev/null)
+
+    echo ""
+    echo -e "  ${BOLD}Files changed in '$dev_branch' compared to '$release_branch':${NC}"
+    for i in "${!diff_files[@]}"; do
+        local dt
+        dt=$(echo "$diff_status_output" | awk -v f="${diff_files[$i]}" '$2==f{print $1; exit}')
+        local lbl
+        case "$dt" in
+            A*)  lbl="${GREEN}[new in dev]${NC}" ;;
+            D*)  lbl="${RED}[deleted in dev]${NC}" ;;
+            M*)  lbl="${YELLOW}[modified]${NC}" ;;
+            R*)  lbl="${CYAN}[renamed]${NC}" ;;
+            *)   lbl="${DIM}[changed]${NC}" ;;
+        esac
+        echo -e "    ${BOLD}$((i+1)))${NC} ${diff_files[$i]}  $lbl"
+    done
+    echo ""
+    dim "Select files to bring from '$dev_branch' into '$release_branch'."
+    dim "Ranges: 1-5  |  All: 'a'  |  Example: 1,3,5-8"
+    echo ""
+
+    prompt "Files to cherry-pick: "
+    read -r file_selection || true
+    file_selection=$(echo "${file_selection:-}" | tr -d '\r')
+
+    # Parse selection
+    local selected_files=()
+    if [[ "$file_selection" =~ ^[Aa]$ ]]; then
+        selected_files=("${diff_files[@]}")
+    else
+        local normalized
+        normalized=$(echo "$file_selection" | tr ',' ' ')
+        read -ra parts <<< "$normalized"
+        for part in "${parts[@]}"; do
+            part=$(echo "$part" | tr -d ' \r')
+            if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                for (( idx=BASH_REMATCH[1]; idx<=BASH_REMATCH[2]; idx++ )); do
+                    local fidx=$((idx - 1))
+                    (( fidx >= 0 && fidx < ${#diff_files[@]} )) && selected_files+=("${diff_files[$fidx]}")
+                done
+            elif [[ "$part" =~ ^[0-9]+$ ]]; then
+                local fidx=$((part - 1))
+                (( fidx >= 0 && fidx < ${#diff_files[@]} )) && selected_files+=("${diff_files[$fidx]}")
+            fi
+        done
+    fi
+
+    if [[ ${#selected_files[@]} -eq 0 ]]; then
+        warn "No valid files selected. Aborting."
+        return 0
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Files selected from '$dev_branch':${NC}"
+    for f in "${selected_files[@]}"; do
+        echo -e "    ${GREEN}→${NC} $f"
+    done
+    echo ""
+
+    # ── Name the custom PR branch ─────────────────────────────────────────
+    print_section "Name the PR Branch"
+
+    local timestamp
+    timestamp=$(date '+%Y%m%d-%H%M%S' 2>/dev/null || echo "$(date '+%s')")
+    local default_branch_name="cherry-pick/dev-to-${release_branch//\//-}-${timestamp}"
+    # Sanitize
+    default_branch_name=$(echo "$default_branch_name" | tr ' ' '-' | tr -cd 'a-zA-Z0-9/_.-')
+
+    echo ""
+    echo -e "  ${BOLD}Default branch name:${NC} $default_branch_name"
+    prompt "Use default? [Y/n] or type a custom name: "
+    read -r branch_input || true
+    branch_input=$(echo "${branch_input:-}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+    local pr_branch="$default_branch_name"
+    if [[ -n "$branch_input" && ! "$branch_input" =~ ^[Yy]$ ]]; then
+        pr_branch=$(echo "$branch_input" | tr ' ' '-' | tr -cd 'a-zA-Z0-9/_.-')
+    fi
+
+    if [[ -z "$pr_branch" ]]; then
+        error "Branch name cannot be empty."
+        return 1
+    fi
+
+    if branch_exists_local "$pr_branch"; then
+        error "Branch '$pr_branch' already exists locally."
+        if confirm "Delete it and recreate from '$release_branch'?"; then
+            git branch -D "$pr_branch"
+        else
+            return 1
+        fi
+    fi
+
+    info "PR branch: $pr_branch"
+
+    # ── Stash if needed ───────────────────────────────────────────────────
+    local stashed=false
+    if has_uncommitted_changes; then
+        warn "You have uncommitted changes."
+        if confirm "Auto-stash before switching?"; then
+            git stash push -m "auto-stash before dev-to-release-pr" --include-untracked
+            stashed=true
+        else
+            error "Cannot proceed with uncommitted changes."
+            return 1
+        fi
+    fi
+
+    # ── Create PR branch off release ──────────────────────────────────────
+    print_section "Creating '$pr_branch' from '$release_branch'"
+
+    git checkout "$release_branch" --quiet
+    git checkout -b "$pr_branch"
+    info "Branch '$pr_branch' created from '$release_branch'."
+
+    # ── Apply selected files from dev ─────────────────────────────────────
+    print_section "Applying Files from '$dev_branch'"
+
+    local applied=0 failed=0
+    for f in "${selected_files[@]}"; do
+        local ftype
+        ftype=$(echo "$diff_status_output" | awk -v fl="$f" '$2==fl{print $1; exit}')
+        if [[ "$ftype" == D* ]]; then
+            if [[ -f "$f" ]]; then
+                git rm "$f" --quiet \
+                    && info "Removed (deleted in dev): $f" \
+                    && applied=$((applied+1)) \
+                    || { warn "Failed to remove: $f"; failed=$((failed+1)); }
+            else
+                warn "Already absent: $f"
+            fi
+        else
+            if git checkout "$dev_branch" -- "$f" 2>/dev/null; then
+                info "Applied: $f"
+                applied=$((applied+1))
+            else
+                warn "Failed to apply: $f"
+                failed=$((failed+1))
+            fi
+        fi
+    done
+
+    echo ""
+    info "$applied file(s) applied from '$dev_branch'."
+    [[ $failed -gt 0 ]] && warn "$failed file(s) could not be applied."
+
+    # Verify something is staged
+    if git diff --cached --quiet 2>/dev/null; then
+        warn "No staged changes after applying files."
+        git checkout "$(current_branch 2>/dev/null || echo "$release_branch")" --quiet 2>/dev/null || true
+        git branch -D "$pr_branch" 2>/dev/null || true
+        $stashed && git stash pop 2>/dev/null || true
+        return 1
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Staged changes:${NC}"
+    git diff --cached --stat 2>/dev/null | sed 's/^/    /' || true
+    echo ""
+
+    # ── Commit ────────────────────────────────────────────────────────────
+    print_section "Commit"
+
+    local file_list
+    file_list=$(printf '%s, ' "${selected_files[@]}" | sed 's/, $//')
+    local default_commit_msg="chore: cherry-pick [${#selected_files[@]} file(s)] from ${dev_branch} → ${release_branch}"
+
+    echo -e "  ${BOLD}Default:${NC} $default_commit_msg"
+    prompt "Use default message? [Y/n]: "
+    read -r use_default || true
+    use_default=$(echo "${use_default:-y}" | tr -d '\r')
+
+    local commit_msg="$default_commit_msg"
+    if [[ "$use_default" =~ ^[Nn]$ ]]; then
+        prompt "Enter commit message: "
+        read -r commit_msg || true
+        commit_msg=$(echo "$commit_msg" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -z "$commit_msg" ]] && commit_msg="$default_commit_msg"
+    fi
+
+    git commit -m "$commit_msg"
+    info "Committed."
+
+    # ── Push & show PR URL ────────────────────────────────────────────────
+    print_section "Push & Raise PR"
+
+    if ! check_remote; then
+        warn "Remote unreachable. Push manually with:"
+        echo -e "    ${DIM}git push -u $REMOTE $pr_branch${NC}"
+        $stashed && git stash pop 2>/dev/null || true
+        return 0
+    fi
+
+    echo ""
+    info "Pushing '$pr_branch' to $REMOTE..."
+    local push_output
+    # Capture both stdout and stderr; git push PR URL comes on stderr
+    push_output=$(git push -u "$REMOTE" "$pr_branch" 2>&1)
+    local push_exit=$?
+    echo "$push_output"
+
+    if [[ $push_exit -ne 0 ]]; then
+        warn "Push failed. Try manually: git push -u $REMOTE $pr_branch"
+    else
+        info "Pushed '$pr_branch' to $REMOTE."
+
+        # Extract PR URL printed by the remote (GitHub / Gitea / GitLab all print one)
+        local pr_url
+        pr_url=$(echo "$push_output" | grep -oE 'https?://[^ ]+/(pull|merge_requests|compare)[^ ]*' | head -1)
+
+        # Fallback: build a compare URL from the remote URL
+        if [[ -z "$pr_url" ]]; then
+            local remote_url
+            remote_url=$(git remote get-url "$REMOTE" 2>/dev/null \
+                | sed 's|://[^@]*@|://|'   \
+                | sed 's|\.git$||')
+            # Gitea / GitHub compare URL pattern
+            pr_url="${remote_url}/compare/${release_branch}...${pr_branch}"
+        fi
+
+        echo ""
+        echo -e "${BOLD}${GREEN}  ✔ PR branch ready!${NC}"
+        echo ""
+        echo -e "  ${BOLD}Source:${NC}  $pr_branch"
+        echo -e "  ${BOLD}Target:${NC}  $release_branch"
+        echo -e "  ${BOLD}Files:${NC}   ${#selected_files[@]} file(s) cherry-picked from $dev_branch"
+        echo ""
+        echo -e "  ${BOLD}${CYAN}Open this URL to create your Pull Request:${NC}"
+        echo -e "    ${CYAN}$pr_url${NC}"
+        echo ""
+    fi
+
+    # Restore stash
+    if $stashed; then
+        if confirm "Restore auto-stashed changes?"; then
+            git stash pop
+            info "Stash restored."
+        fi
+    fi
+
+    echo ""
+    info "Done. Current branch: $(current_branch)"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN MENU
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1575,6 +1933,7 @@ main_menu() {
         echo -e "    ${BOLD}8)${NC} Branch Cleanup"
         echo -e "    ${BOLD}9)${NC} Resolve Rebase/Merge Conflicts"
         echo -e "    ${BOLD}10)${NC} Cherry-Pick Specific Files from Branch"
+        echo -e "    ${BOLD}11)${NC} Dev → Release: Cherry-Pick Files & Raise PR"
         echo -e "    ${BOLD}q)${NC} Quit"
         echo ""
 
@@ -1593,6 +1952,7 @@ main_menu() {
             8) branch_cleanup ;;
             9) resolve_conflicts ;;
             10) cherry_pick_files ;;
+            11) dev_to_release_pr ;;
             q|Q) echo ""; info "Goodbye!"; echo ""; exit 0 ;;
             *) error "Invalid selection. Try again." ;;
         esac
