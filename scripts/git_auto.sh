@@ -1019,11 +1019,22 @@ stash_management() {
             git stash pop && info "Latest stash popped." || error "No stash to pop."
             ;;
         5)
-            git stash list
-            echo ""
-            prompt "Enter stash index to drop (e.g. 0): "
-            read -r stash_idx || true
-            git stash drop "stash@{$stash_idx}" && info "Stash dropped." || error "Invalid stash index."
+            local stash_entries
+            stash_entries=$(git stash list 2>/dev/null)
+            if [[ -z "$stash_entries" ]]; then
+                info "No stashes to drop."
+            else
+                echo "$stash_entries"
+                echo ""
+                prompt "Enter stash index to drop (e.g. 0): "
+                read -r stash_idx || true
+                stash_idx=$(echo "${stash_idx:-}" | tr -d '\r')
+                if [[ "$stash_idx" =~ ^[0-9]+$ ]]; then
+                    git stash drop "stash@{$stash_idx}" && info "Stash dropped." || error "Failed to drop stash@{$stash_idx}."
+                else
+                    error "Invalid index: '$stash_idx'. Must be a number."
+                fi
+            fi
             ;;
         6)
             if confirm "Drop ALL stashes? This cannot be undone."; then
@@ -1305,6 +1316,20 @@ cherry_pick_files() {
 
     local current
     current=$(current_branch)
+    local stashed=false
+    local switched=false
+
+    # Helper: restore state on early exit (stash + branch)
+    _cp_cleanup() {
+        if $switched; then
+            git checkout "$current" --quiet 2>/dev/null || true
+        fi
+        if $stashed; then
+            git stash pop --quiet 2>/dev/null \
+                && info "Auto-stashed changes restored." \
+                || warn "Could not restore stash. Use 'git stash pop' manually."
+        fi
+    }
 
     # ── Select source branch ─────────────────────────────────────────────
     print_section "Select Source Branch"
@@ -1371,7 +1396,8 @@ cherry_pick_files() {
     if [[ "$tsel" =~ ^[0-9]+$ ]] && (( tsel >= 2 && tsel <= ${#non_current_branches[@]}+1 )); then
         target_branch="${non_current_branches[$((tsel-2))]}"
     elif [[ ! "$tsel" =~ ^1$ ]]; then
-        error "Invalid selection. Using current branch '$current'."
+        error "Invalid selection."
+        return 1
     fi
 
     info "Target branch: $target_branch"
@@ -1382,12 +1408,18 @@ cherry_pick_files() {
             warn "Uncommitted changes detected."
             if confirm "Auto-stash before switching to '$target_branch'?"; then
                 git stash push -m "auto-stash before cherry-pick-files" --include-untracked
+                stashed=true
             else
                 error "Cannot switch branches with uncommitted changes."
                 return 1
             fi
         fi
-        git checkout "$target_branch" --quiet
+        if ! git checkout "$target_branch" --quiet; then
+            error "Failed to switch to '$target_branch'."
+            _cp_cleanup
+            return 1
+        fi
+        switched=true
         info "Switched to '$target_branch'."
     fi
 
@@ -1401,6 +1433,7 @@ cherry_pick_files() {
 
     if [[ ${#diff_files[@]} -eq 0 ]]; then
         info "No file differences found between '$source_branch' and '$target_branch'."
+        _cp_cleanup
         return 0
     fi
 
@@ -1412,7 +1445,7 @@ cherry_pick_files() {
     echo -e "  ${BOLD}Changed files (source vs target):${NC}"
     for i in "${!diff_files[@]}"; do
         local diff_type
-        diff_type=$(echo "$diff_status_output" | awk -v f="${diff_files[$i]}" '$2==f{print $1; exit}')
+        diff_type=$(echo "$diff_status_output" | awk -v f="${diff_files[$i]}" '($2==f || $3==f){print $1; exit}')
         local status_label
         case "$diff_type" in
             A*)  status_label="${GREEN}[added in source]${NC}" ;;
@@ -1456,6 +1489,7 @@ cherry_pick_files() {
 
     if [[ ${#selected_files[@]} -eq 0 ]]; then
         warn "No valid files selected. Aborting."
+        _cp_cleanup
         return 0
     fi
 
@@ -1468,6 +1502,7 @@ cherry_pick_files() {
 
     if ! confirm "Apply these ${#selected_files[@]} file(s) from '$source_branch' into '$target_branch'?"; then
         warn "Cherry-pick files cancelled."
+        _cp_cleanup
         return 0
     fi
 
@@ -1475,7 +1510,7 @@ cherry_pick_files() {
     local applied=0 failed=0
     for f in "${selected_files[@]}"; do
         local ftype
-        ftype=$(echo "$diff_status_output" | awk -v fl="$f" '$2==fl{print $1; exit}')
+        ftype=$(echo "$diff_status_output" | awk -v fl="$f" '($2==fl || $3==fl){print $1; exit}')
         if [[ "$ftype" == D* ]]; then
             # File deleted in source — remove it from target
             if [[ -f "$f" ]]; then
@@ -1523,8 +1558,12 @@ cherry_pick_files() {
             [[ -z "$commit_msg" ]] && commit_msg="$default_msg"
         fi
 
-        git commit -m "$commit_msg"
-        info "Committed: $commit_msg"
+        if git commit -m "$commit_msg"; then
+            info "Committed: $commit_msg"
+        else
+            error "Commit failed."
+            return 1
+        fi
 
         # ── Optional push ─────────────────────────────────────────────────
         if check_remote && confirm "Push '$target_branch' to $REMOTE?"; then
@@ -1551,6 +1590,19 @@ cherry_pick_files() {
 dev_to_release_pr() {
     print_header "Dev → Release: Cherry-Pick Files & Raise PR"
 
+    local original_branch
+    original_branch=$(current_branch)
+    local stashed=false
+
+    # Helper: restore stash on the correct branch
+    _dtr_restore_stash() {
+        if $stashed; then
+            git stash pop --quiet 2>/dev/null \
+                && info "Auto-stashed changes restored." \
+                || warn "Could not restore stash. Use 'git stash pop' manually."
+        fi
+    }
+
     # ── Resolve development branch (development or develop) ─────────────
     local dev_branch=""
     for candidate in "development" "develop"; do
@@ -1575,7 +1627,12 @@ dev_to_release_pr() {
     else
         info "Updating '$dev_branch' from $REMOTE..."
         git fetch "$REMOTE" "$dev_branch" --quiet 2>/dev/null || warn "Fetch failed — using local copy."
-        git branch -f "$dev_branch" "refs/remotes/$REMOTE/$dev_branch" 2>/dev/null || true
+        # Fast-forward local branch to match remote (safe: won't discard local-only commits)
+        if git merge-base --is-ancestor "$dev_branch" "refs/remotes/$REMOTE/$dev_branch" 2>/dev/null; then
+            git branch -f "$dev_branch" "refs/remotes/$REMOTE/$dev_branch" 2>/dev/null || true
+        else
+            warn "'$dev_branch' has local commits not on $REMOTE — using local version."
+        fi
     fi
 
     # ── Resolve release branch (always named 'release') ──────────────────
@@ -1595,7 +1652,12 @@ dev_to_release_pr() {
             || { error "Could not fetch '$release_branch'."; return 1; }
     else
         git fetch "$REMOTE" "$release_branch" --quiet 2>/dev/null || warn "Fetch failed — using local copy."
-        git branch -f "$release_branch" "refs/remotes/$REMOTE/$release_branch" 2>/dev/null || true
+        # Fast-forward local branch to match remote (safe: won't discard local-only commits)
+        if git merge-base --is-ancestor "$release_branch" "refs/remotes/$REMOTE/$release_branch" 2>/dev/null; then
+            git branch -f "$release_branch" "refs/remotes/$REMOTE/$release_branch" 2>/dev/null || true
+        else
+            warn "'$release_branch' has local commits not on $REMOTE — using local version."
+        fi
     fi
 
     # ── Show files differing between dev and release ──────────────────────
@@ -1619,7 +1681,7 @@ dev_to_release_pr() {
     echo -e "  ${BOLD}Files changed in '$dev_branch' compared to '$release_branch':${NC}"
     for i in "${!diff_files[@]}"; do
         local dt
-        dt=$(echo "$diff_status_output" | awk -v f="${diff_files[$i]}" '$2==f{print $1; exit}')
+        dt=$(echo "$diff_status_output" | awk -v f="${diff_files[$i]}" '($2==f || $3==f){print $1; exit}')
         local lbl
         case "$dt" in
             A*)  lbl="${GREEN}[new in dev]${NC}" ;;
@@ -1679,8 +1741,8 @@ dev_to_release_pr() {
     local timestamp
     timestamp=$(date '+%Y%m%d-%H%M%S' 2>/dev/null || echo "$(date '+%s')")
     local default_branch_name="cherry-pick/dev-to-${release_branch//\//-}-${timestamp}"
-    # Sanitize
-    default_branch_name=$(echo "$default_branch_name" | tr ' ' '-' | tr -cd 'a-zA-Z0-9/_.-')
+    # Sanitize: allow alphanum, slashes, dots, hyphens, underscores; strip leading dash
+    default_branch_name=$(echo "$default_branch_name" | tr ' ' '-' | tr -cd 'a-zA-Z0-9/_.-' | sed 's/^-*//')
 
     echo ""
     echo -e "  ${BOLD}Default branch name:${NC} $default_branch_name"
@@ -1690,7 +1752,7 @@ dev_to_release_pr() {
 
     local pr_branch="$default_branch_name"
     if [[ -n "$branch_input" && ! "$branch_input" =~ ^[Yy]$ ]]; then
-        pr_branch=$(echo "$branch_input" | tr ' ' '-' | tr -cd 'a-zA-Z0-9/_.-')
+        pr_branch=$(echo "$branch_input" | tr ' ' '-' | tr -cd 'a-zA-Z0-9/_.-' | sed 's/^-*//')
     fi
 
     if [[ -z "$pr_branch" ]]; then
@@ -1710,7 +1772,6 @@ dev_to_release_pr() {
     info "PR branch: $pr_branch"
 
     # ── Stash if needed ───────────────────────────────────────────────────
-    local stashed=false
     if has_uncommitted_changes; then
         warn "You have uncommitted changes."
         if confirm "Auto-stash before switching?"; then
@@ -1725,8 +1786,17 @@ dev_to_release_pr() {
     # ── Create PR branch off release ──────────────────────────────────────
     print_section "Creating '$pr_branch' from '$release_branch'"
 
-    git checkout "$release_branch" --quiet
-    git checkout -b "$pr_branch"
+    if ! git checkout "$release_branch" --quiet; then
+        error "Failed to switch to '$release_branch'."
+        _dtr_restore_stash
+        return 1
+    fi
+    if ! git checkout -b "$pr_branch"; then
+        error "Failed to create branch '$pr_branch'."
+        git checkout "$original_branch" --quiet 2>/dev/null || true
+        _dtr_restore_stash
+        return 1
+    fi
     info "Branch '$pr_branch' created from '$release_branch'."
 
     # ── Apply selected files from dev ─────────────────────────────────────
@@ -1735,7 +1805,7 @@ dev_to_release_pr() {
     local applied=0 failed=0
     for f in "${selected_files[@]}"; do
         local ftype
-        ftype=$(echo "$diff_status_output" | awk -v fl="$f" '$2==fl{print $1; exit}')
+        ftype=$(echo "$diff_status_output" | awk -v fl="$f" '($2==fl || $3==fl){print $1; exit}')
         if [[ "$ftype" == D* ]]; then
             if [[ -f "$f" ]]; then
                 git rm "$f" --quiet \
@@ -1763,9 +1833,10 @@ dev_to_release_pr() {
     # Verify something is staged
     if git diff --cached --quiet 2>/dev/null; then
         warn "No staged changes after applying files."
-        git checkout "$(current_branch 2>/dev/null || echo "$release_branch")" --quiet 2>/dev/null || true
+        git checkout "$release_branch" --quiet 2>/dev/null || true
         git branch -D "$pr_branch" 2>/dev/null || true
-        $stashed && git stash pop 2>/dev/null || true
+        git checkout "$original_branch" --quiet 2>/dev/null || true
+        _dtr_restore_stash
         return 1
     fi
 
@@ -1777,8 +1848,6 @@ dev_to_release_pr() {
     # ── Commit ────────────────────────────────────────────────────────────
     print_section "Commit"
 
-    local file_list
-    file_list=$(printf '%s, ' "${selected_files[@]}" | sed 's/, $//')
     local default_commit_msg="chore: cherry-pick [${#selected_files[@]} file(s)] from ${dev_branch} → ${release_branch}"
 
     echo -e "  ${BOLD}Default:${NC} $default_commit_msg"
@@ -1794,7 +1863,10 @@ dev_to_release_pr() {
         [[ -z "$commit_msg" ]] && commit_msg="$default_commit_msg"
     fi
 
-    git commit -m "$commit_msg"
+    if ! git commit -m "$commit_msg"; then
+        error "Commit failed."
+        return 1
+    fi
     info "Committed."
 
     # ── Push & show PR URL ────────────────────────────────────────────────
@@ -1803,7 +1875,10 @@ dev_to_release_pr() {
     if ! check_remote; then
         warn "Remote unreachable. Push manually with:"
         echo -e "    ${DIM}git push -u $REMOTE $pr_branch${NC}"
-        $stashed && git stash pop 2>/dev/null || true
+        warn "You are on branch '$pr_branch'. Switch back with: git checkout $original_branch"
+        if $stashed; then
+            warn "Your stashed changes are still saved. Restore with: git stash pop"
+        fi
         return 0
     fi
 
@@ -1820,9 +1895,13 @@ dev_to_release_pr() {
     else
         info "Pushed '$pr_branch' to $REMOTE."
 
+        # Strip ANSI codes before extracting URL
+        local clean_output
+        clean_output=$(echo "$push_output" | sed 's/\x1b\[[0-9;]*m//g')
+
         # Extract PR URL printed by the remote (GitHub / Gitea / GitLab all print one)
         local pr_url
-        pr_url=$(echo "$push_output" | grep -oE 'https?://[^ ]+/(pull|merge_requests|compare)[^ ]*' | head -1)
+        pr_url=$(echo "$clean_output" | grep -oE 'https?://[^ ]+/(pull|merge_requests|compare)[^ ]*' | head -1)
 
         # Fallback: build a compare URL from the remote URL
         if [[ -z "$pr_url" ]]; then
@@ -1846,12 +1925,20 @@ dev_to_release_pr() {
         echo ""
     fi
 
-    # Restore stash
+    # Restore stash on the original branch (not on pr_branch)
     if $stashed; then
-        if confirm "Restore auto-stashed changes?"; then
-            git stash pop
-            info "Stash restored."
+        git checkout "$original_branch" --quiet 2>/dev/null || true
+        if confirm "Restore auto-stashed changes (on '$original_branch')?"; then
+            if git stash pop; then
+                info "Stash restored on '$original_branch'."
+            else
+                warn "Stash pop failed. Your changes are still in stash."
+            fi
+        else
+            warn "Stash preserved. Use 'git stash pop' to restore later."
         fi
+        # Switch back to pr_branch so the user sees the result
+        git checkout "$pr_branch" --quiet 2>/dev/null || true
     fi
 
     echo ""
