@@ -1551,22 +1551,17 @@ cherry_pick_files() {
 dev_to_release_pr() {
     print_header "Dev → Release: Cherry-Pick Files & Raise PR"
 
-    # ── Resolve development branch ───────────────────────────────────────
+    # ── Resolve development branch (development or develop) ─────────────
     local dev_branch=""
-    for candidate in "development" "develop" "dev"; do
-        if branch_exists_local "$candidate"; then
-            dev_branch="$candidate"
-            break
-        fi
-        # Also check remote
-        if branch_exists_remote "$candidate"; then
+    for candidate in "development" "develop"; do
+        if branch_exists_local "$candidate" || branch_exists_remote "$candidate"; then
             dev_branch="$candidate"
             break
         fi
     done
 
     if [[ -z "$dev_branch" ]]; then
-        error "No development branch found (tried: development, develop, dev)."
+        error "No development branch found (tried: development, develop)."
         error "Please ensure your development branch exists locally or on $REMOTE."
         return 1
     fi
@@ -1583,62 +1578,23 @@ dev_to_release_pr() {
         git branch -f "$dev_branch" "refs/remotes/$REMOTE/$dev_branch" 2>/dev/null || true
     fi
 
-    # ── Select release branch ────────────────────────────────────────────
-    print_section "Select Target Release Branch"
+    # ── Resolve release branch (always named 'release') ──────────────────
+    local release_branch="release"
 
-    local release_branches=()
-    # Gather all local release/* branches, plus 'main' / 'master' as fallback options
-    while IFS= read -r b; do
-        b=$(echo "$b" | tr -d ' *')
-        [[ -z "$b" || "$b" == "$dev_branch" ]] && continue
-        release_branches+=("$b")
-    done < <(
-        {
-            git branch --list 'release/*' 2>/dev/null
-            git branch --list 'main' 'master' 2>/dev/null
-        } | sed 's|^[* ]*||' | sort -u
-    )
-
-    # Also include remote-only release/* branches not yet checked out
-    while IFS= read -r rb; do
-        rb=$(echo "$rb" | sed 's|.*/||')
-        [[ -z "$rb" || "$rb" == "$dev_branch" ]] && continue
-        local already=false
-        for b in "${release_branches[@]}"; do [[ "$b" == "$rb" ]] && already=true && break; done
-        $already || release_branches+=("$rb")
-    done < <(git branch -r 2>/dev/null | grep -E 'release/' | sed 's|^[* ]*||')
-
-    if [[ ${#release_branches[@]} -eq 0 ]]; then
-        error "No release branches found (release/*, main, master)."
-        error "Please create a release branch first."
+    if ! branch_exists_local "$release_branch" && ! branch_exists_remote "$release_branch"; then
+        error "No 'release' branch found locally or on $REMOTE."
+        error "Please create the 'release' branch first."
         return 1
     fi
-
-    echo ""
-    for i in "${!release_branches[@]}"; do
-        echo -e "    ${BOLD}$((i+1)))${NC} ${release_branches[$i]}"
-    done
-    echo ""
-
-    prompt "Select release branch [1-${#release_branches[@]}]: "
-    read -r sel || true
-    sel=$(echo "${sel:-}" | tr -d '\r')
-
-    if [[ ! "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > ${#release_branches[@]} )); then
-        error "Invalid selection."
-        return 1
-    fi
-
-    local release_branch="${release_branches[$((sel-1))]}"
     info "Release branch: $release_branch"
 
-    # Ensure release branch exists locally
+    # Ensure release branch exists locally and is up-to-date
     if ! branch_exists_local "$release_branch"; then
-        info "Checking out '$release_branch' from $REMOTE..."
+        info "Fetching '$release_branch' from $REMOTE..."
         git fetch "$REMOTE" "$release_branch":"$release_branch" --quiet 2>/dev/null \
             || { error "Could not fetch '$release_branch'."; return 1; }
     else
-        git fetch "$REMOTE" "$release_branch" --quiet 2>/dev/null || warn "Fetch failed."
+        git fetch "$REMOTE" "$release_branch" --quiet 2>/dev/null || warn "Fetch failed — using local copy."
         git branch -f "$release_branch" "refs/remotes/$REMOTE/$release_branch" 2>/dev/null || true
     fi
 
@@ -1675,7 +1631,7 @@ dev_to_release_pr() {
         echo -e "    ${BOLD}$((i+1)))${NC} ${diff_files[$i]}  $lbl"
     done
     echo ""
-    dim "Select files to bring from '$dev_branch' into '$release_branch'."
+    dim "Select files to promote from '$dev_branch' to '$release_branch'."
     dim "Ranges: 1-5  |  All: 'a'  |  Example: 1,3,5-8"
     echo ""
 
