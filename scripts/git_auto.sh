@@ -1476,7 +1476,8 @@ cherry_pick_files() {
         for part in "${parts[@]}"; do
             part=$(echo "$part" | tr -d ' \r')
             if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-                for (( idx=BASH_REMATCH[1]; idx<=BASH_REMATCH[2]; idx++ )); do
+                local range_start="${BASH_REMATCH[1]}" range_end="${BASH_REMATCH[2]}"
+                for (( idx=range_start; idx<=range_end; idx++ )); do
                     local fidx=$((idx - 1))
                     (( fidx >= 0 && fidx < ${#diff_files[@]} )) && selected_files+=("${diff_files[$fidx]}")
                 done
@@ -1485,6 +1486,15 @@ cherry_pick_files() {
                 (( fidx >= 0 && fidx < ${#diff_files[@]} )) && selected_files+=("${diff_files[$fidx]}")
             fi
         done
+        # Deduplicate while preserving order
+        local seen_files=()
+        local deduped_files=()
+        for f in "${selected_files[@]}"; do
+            local already=0
+            for s in "${seen_files[@]}"; do [[ "$s" == "$f" ]] && already=1 && break; done
+            (( already == 0 )) && deduped_files+=("$f") && seen_files+=("$f")
+        done
+        selected_files=("${deduped_files[@]}")
     fi
 
     if [[ ${#selected_files[@]} -eq 0 ]]; then
@@ -1712,7 +1722,8 @@ dev_to_release_pr() {
         for part in "${parts[@]}"; do
             part=$(echo "$part" | tr -d ' \r')
             if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-                for (( idx=BASH_REMATCH[1]; idx<=BASH_REMATCH[2]; idx++ )); do
+                local range_start="${BASH_REMATCH[1]}" range_end="${BASH_REMATCH[2]}"
+                for (( idx=range_start; idx<=range_end; idx++ )); do
                     local fidx=$((idx - 1))
                     (( fidx >= 0 && fidx < ${#diff_files[@]} )) && selected_files+=("${diff_files[$fidx]}")
                 done
@@ -1721,6 +1732,15 @@ dev_to_release_pr() {
                 (( fidx >= 0 && fidx < ${#diff_files[@]} )) && selected_files+=("${diff_files[$fidx]}")
             fi
         done
+        # Deduplicate while preserving order
+        local seen_files=()
+        local deduped_files=()
+        for f in "${selected_files[@]}"; do
+            local already=0
+            for s in "${seen_files[@]}"; do [[ "$s" == "$f" ]] && already=1 && break; done
+            (( already == 0 )) && deduped_files+=("$f") && seen_files+=("$f")
+        done
+        selected_files=("${deduped_files[@]}")
     fi
 
     if [[ ${#selected_files[@]} -eq 0 ]]; then
