@@ -184,6 +184,19 @@ class FileWriter:
             self.add_header(ws, current_row, last_column)
             current_row += 5
 
+        name, size, bold, color, alignment, wrap_text, fill_color, fill_type = self.set_cell_properties(
+            font_settings
+        )
+        for col, header in enumerate(data.columns, start=1):
+            cell = ws.cell(row=current_row, column=col)
+            cell.value = header
+            cell.font = Font(name=name, size=size, bold=bold, color=color)
+            cell.alignment = Alignment(horizontal=alignment, wrap_text=wrap_text)
+            cell.fill = PatternFill(fill_type=fill_type, fgColor=fill_color)
+        current_row += 1
+
+        self.set_column_widths(ws, self.max_column_width)
+
         for group in data[self.grouping_column].unique():
             current_row = self.apply_border(ws, current_row, last_column, self.border_to_row)
             self.write_group_name(ws, current_row, group, self.grouping_column, last_column)
